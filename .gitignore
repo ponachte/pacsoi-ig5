@@ -1,0 +1,7 @@
+config.json
+state/*
+!state/.gitkeep
+results/*
+!results/.gitkeep
+node_modules/
+

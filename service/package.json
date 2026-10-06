@@ -1,0 +1,22 @@
+{
+  "name": "pacsoi-latency",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Weight-only PACSOI aggregation service for the IG5 latency lab",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@incremunica/query-sparql-incremental": "^2.3.6",
+    "@incremunica/user-tools": "^2.3.0",
+    "async-mutex": "^0.5.0",
+    "fastify": "^5.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^5.9.3"
+  }
+}

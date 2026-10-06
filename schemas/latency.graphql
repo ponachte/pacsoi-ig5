@@ -1,0 +1,49 @@
+type Query {
+  patients: [Patient!]!
+  bariatricProcedures: [MedicalProcedure!]!
+  weightObservations: [WeightObservation!]!
+}
+
+type Patient @class(iri: "http://xmlns.com/foaf/0.1/Person") {
+  id: ID!
+  sphn_hasIdentifier: [SubjectPseudoIdentifier!]
+    @predicate(iri: "https://sphn.ch/hasIdentifier")
+}
+
+type SubjectPseudoIdentifier @class(iri: "https://sphn.ch/SubjectPseudoIdentifier") {
+  id: ID!
+  saref_hasValue: String! @predicate(iri: "https://saref.etsi.org/core/hasValue")
+  fhir_issuer: ID! @predicate(iri: "http://hl7.org/fhir/issuer")
+}
+
+type MedicalProcedure @class(iri: "https://sphn.ch/MedicalProcedure") {
+  id: ID!
+  prov_type: ID! @predicate(iri: "http://www.w3.org/ns/prov#type")
+  prov_startedAtTime: DateTime! @predicate(iri: "http://www.w3.org/ns/prov#startedAtTime")
+  subject: ID! @predicate(iri: "https://sphn.ch/hasIntervention", reverse: true)
+}
+
+type WeightObservation @class(iri: "http://www.w3.org/ns/sosa/Observation") {
+  id: ID!
+  sosa_hasFeatureOfInterest: ID! @predicate(iri: "http://www.w3.org/ns/sosa/hasFeatureOfInterest")
+  sosa_hasResult: WeightValue! @predicate(iri: "http://www.w3.org/ns/sosa/hasResult")
+  sosa_observedProperty: ID!
+    @predicate(iri: "http://www.w3.org/ns/sosa/observedProperty")
+    @filter(if: "it=='http://snomed.info/id/27113001'")
+}
+
+type WeightValue @class(iri: "https://saref.etsi.org/core/PropertyValue") {
+  id: ID!
+  saref_isValueOfProperty: ID!
+    @predicate(iri: "https://saref.etsi.org/core/isValueOfProperty")
+    @filter(if: "it=='http://snomed.info/id/27113001'")
+  saref_hasValue: Float! @predicate(iri: "https://saref.etsi.org/core/hasValue")
+  saref_hasTimestamp: DateTime! @predicate(iri: "https://saref.etsi.org/core/hasTimestamp")
+}
+
+type Subscription {
+  onPatientAdded: Patient!
+  onPatientRemoved: Patient!
+  onbariatricProcedureAdded: MedicalProcedure!
+  onWeightObservationAdded: WeightObservation!
+}

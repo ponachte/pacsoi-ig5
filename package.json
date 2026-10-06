@@ -1,0 +1,19 @@
+{
+  "name": "pacsoi-ig5-latency-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Harness for measuring Kvasir-to-Aggregator propagation latency",
+  "bin": {
+    "latency-lab": "bin/latency-lab.js"
+  },
+  "scripts": {
+    "start": "node bin/latency-lab.js",
+    "test": "node --test test/*.test.js",
+    "test:service": "npm --prefix service test",
+    "test:all": "npm test && npm run test:service"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
