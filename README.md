@@ -80,7 +80,7 @@ publishes an unprofiled `pacsoi-latency` deployment function with this contract:
 - the service must remain directly readable without UMA; and
 - the weight distribution must remain available at `/w-dist` with the existing CSV columns.
 
-The container is published as `ghcr.io/solidlabresearch/pacsoi-latency`. The Aggregator
+The container is published as `ghcr.io/ponachte/pacsoi-latency`. The Aggregator
 definition selects that image when an experiment deploys its service.
 
 ## Current boundary

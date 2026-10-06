@@ -33,8 +33,10 @@ Run its tests independently with:
 make service-test
 ```
 
-The GitHub Actions workflow publishes `ghcr.io/solidlabresearch/pacsoi-latency`
-for pushes to `main`, version tags, and manual runs. The Aggregator's unprofiled
+The GitHub Actions workflow publishes `ghcr.io/ponachte/pacsoi-latency`
+for pushes to `main`, version tags, and manual runs. Pull requests build and test
+the image without publishing it. The package includes an OCI source label linking
+it to this repository. The Aggregator's unprofiled
 deployment definition publishes `/deployments/pacsoi-latency#sources` with
 datatype `xsd:string`; the lab sends the JSON source array as that predicate's
 literal value.
