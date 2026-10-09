@@ -1,4 +1,4 @@
-.PHONY: help test service-test image-build doctor pods slices aggregator service run
+.PHONY: help test service-test image-build mock-image-build mock-server mock-reset check run
 
 help:
 	@node bin/latency-lab.js help
@@ -12,23 +12,17 @@ service-test:
 image-build:
 	@docker build -t pacsoi-latency:latest service
 
-doctor:
-	@node bin/latency-lab.js doctor
+mock-image-build:
+	@docker build -f mock/Dockerfile -t pacsoi-pod-mock:latest .
 
-pods:
-	@node bin/latency-lab.js pods provision
+mock-server:
+	@node mock/pod-server.js
 
-slices:
-	@node bin/latency-lab.js slices setup
+mock-reset:
+	@node bin/latency-lab.js mock reset
 
-aggregator:
-	@node bin/latency-lab.js aggregator register
-
-service:
-	@node bin/latency-lab.js service deploy
+check:
+	@node bin/latency-lab.js check
 
 run:
 	@node bin/latency-lab.js run
-
-cleanup:
-	@node bin/latency-lab.js pods cleanup --confirm

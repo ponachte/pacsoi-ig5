@@ -3,7 +3,6 @@ type Patient = { procedure?: Date; observations: Observation[] };
 
 export class WeightDistribution {
   private patients = new Map<string, Patient>();
-  private pendingProcedures = new Map<string, Date>();
   private pendingObservations = new Map<string, Observation[]>();
   private monthly = new Map<number, number[]>();
 
@@ -11,20 +10,12 @@ export class WeightDistribution {
     if (this.patients.has(patientId)) return;
     const patient: Patient = { observations: [] };
     this.patients.set(patientId, patient);
-    const procedure = this.pendingProcedures.get(patientId);
-    if (procedure) {
-      patient.procedure = procedure;
-      this.pendingProcedures.delete(patientId);
-    }
     this.flush(patientId);
   }
 
   addProcedure(patientId: string, timestamp: Date) {
-    const patient = this.patients.get(patientId);
-    if (!patient) {
-      if (!this.pendingProcedures.has(patientId)) this.pendingProcedures.set(patientId, timestamp);
-      return;
-    }
+    if (!this.patients.has(patientId)) this.addPatient(patientId);
+    const patient = this.patients.get(patientId)!;
     if (!patient.procedure) patient.procedure = timestamp;
     this.flush(patientId);
   }
@@ -57,6 +48,15 @@ export class WeightDistribution {
       ].join(","));
     }
     return lines.join("\n");
+  }
+
+  stats() {
+    return {
+      patients: this.patients.size,
+      pendingPatients: this.pendingObservations.size,
+      observations: [...this.monthly.values()].reduce((total, values) => total + values.length, 0),
+      months: this.monthly.size,
+    };
   }
 
   private flush(patientId: string) {

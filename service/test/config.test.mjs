@@ -1,35 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parsePodSources, readConfig } from "../dist/config.js";
+import { buildPodSources, readConfig } from "../dist/config.js";
 
-test("parses and normalizes pod source URLs", () => {
-  assert.deepEqual(
-    parsePodSources('["https://pods.example/alice/", "http://pods.example/bob"]'),
-    ["https://pods.example/alice", "http://pods.example/bob"],
-  );
+test("builds a deterministic virtual pod inventory without a large environment variable", () => {
+  const sources = buildPodSources("http://mock:3001/", "latency", 10_000);
+  assert.equal(sources.length, 10_000);
+  assert.equal(sources[0], "http://mock:3001/latency00001");
+  assert.equal(sources.at(-1), "http://mock:3001/latency10000");
 });
 
-test("rejects invalid pod source configuration", () => {
-  assert.throws(() => parsePodSources(undefined), /SOURCES must be set/);
-  assert.throws(() => parsePodSources("not-json"), /JSON array/);
-  assert.throws(() => parsePodSources("[]"), /non-empty/);
-  assert.throws(() => parsePodSources('["file:///tmp/pod"]'), /http or https/);
-  assert.throws(
-    () => parsePodSources('["https://pods.example/alice", "https://pods.example/alice/"]'),
-    /duplicate/,
-  );
-});
-
-test("reads the three combined-slice names", () => {
+test("reads standalone service configuration", () => {
   assert.deepEqual(readConfig({
-    SOURCES: '["https://pods.example/alice"]',
-    PATIENT_SLICE: "/pacsoi-latency/",
-    BAR_PROCEDURE_SLICE: "pacsoi-latency",
-    WEIGHT_SLICE: " pacsoi-latency ",
+    POD_SERVER_URL: "http://mock:3001",
+    POD_PREFIX: "test",
+    POD_COUNT: "2",
+    SLICE_NAME: "pacsoi-latency",
+    PORT: "4000",
   }), {
-    podBaseUrls: ["https://pods.example/alice"],
-    patientSlice: "pacsoi-latency",
-    procedureSlice: "pacsoi-latency",
-    weightSlice: "pacsoi-latency",
+    podBaseUrls: ["http://mock:3001/test001", "http://mock:3001/test002"],
+    sliceName: "pacsoi-latency",
+    port: 4000,
   });
 });

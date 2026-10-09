@@ -1,24 +1,21 @@
 {
-  "kvasir": {
-    "serverUrl": "https://kvasir.example.org",
-    "clientId": "latency-lab",
-    "clientSecret": "replace-me"
+  "mock": {
+    "serverUrl": "http://localhost:3001"
   },
-  "aggregator": {
-    "serverUrl": "http://aggregator.local:5080",
-    "deploymentFunction": "pacsoi-latency",
-    "serviceName": "pacsoi-latency",
-    "sourceParameter": "sources",
-    "weightPath": "w-dist"
+  "service": {
+    "serverUrl": "http://localhost:3000"
   },
   "experiment": {
     "podPrefix": "latency",
     "podCount": 1,
     "sliceName": "pacsoi-latency",
+    "initialObservationsPerPod": 1,
     "iterations": 5,
     "minObservationsPerPod": 1,
     "maxObservationsPerPod": 5,
     "pollIntervalMs": 100,
-    "timeoutMs": 60000
+    "timeoutMs": 360000,
+    "writeConcurrency": 100,
+    "resourceSampleIntervalMs": 250
   }
 }

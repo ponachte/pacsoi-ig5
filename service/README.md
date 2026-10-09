@@ -1,46 +1,24 @@
-# PACSOI latency service
+# PACSOI standalone latency service
 
-This is the standalone, weight-only service used by the `pacsoi-ig5` latency
-lab. It is intentionally separate from `pacsoi-service`.
+This container reads the virtual pod server directly. It does not require an
+Aggregator deployment or an external Kvasir instance.
 
-`SOURCES` must contain a JSON array of Kvasir pod base URLs. For each pod, the
-service attaches `<pod>/slices/<slice>/query` to three incremental views:
-patients, bariatric procedures, and weight observations. The lab uses one
-combined slice named `pacsoi-latency` for all three views.
+Environment variables:
 
-Required environment variables:
+| Variable | Required | Description |
+| --- | --- | --- |
+| `POD_SERVER_URL` | yes | Base URL reachable from the service |
+| `POD_COUNT` | yes | Number of virtual pods |
+| `POD_PREFIX` | no | Pod prefix; defaults to `latency` |
+| `SLICE_NAME` | no | Combined slice name; defaults to `pacsoi-latency` |
+| `PORT` | no | HTTP port; defaults to `3000` |
 
-| Variable | Value |
-| --- | --- |
-| `SOURCES` | JSON array of pod base URLs |
-| `PATIENT_SLICE` | Combined slice name |
-| `BAR_PROCEDURE_SLICE` | Combined slice name |
-| `WEIGHT_SLICE` | Combined slice name |
+The service constructs pod URLs internally, so 10,000 URLs do not have to fit
+inside one environment variable. It exposes:
 
-The anonymous `GET /w-dist` endpoint returns
-`month,avg_weight,stdev,q25,q75,count` CSV. The service has no HCP discovery,
-Oxford/knee streams, or UMA dependency.
+- `GET /health` for liveness;
+- `GET /metrics` for memory, CPU, event-loop, and distribution state; and
+- `GET /w-dist` for the complete CSV weight distribution.
 
-Build the standalone image from the repository root with:
-
-```sh
-make image-build
-```
-
-Run its tests independently with:
-
-```sh
-make service-test
-```
-
-The GitHub Actions workflow publishes `ghcr.io/ponachte/pacsoi-latency`
-for pushes to `main`, version tags, and manual runs. Pull requests build and test
-the image without publishing it. The package includes an OCI source label linking
-it to this repository. The Aggregator's unprofiled
-deployment definition publishes `/deployments/pacsoi-latency#sources` with
-datatype `xsd:string`; the lab sends the JSON source array as that predicate's
-literal value.
-
-The Slices cluster can pull this image anonymously when the GHCR package is
-public. If the repository or package remains private, configure an
-`imagePullSecret` in the Aggregator namespace before deploying the service.
+Build with `docker build -t pacsoi-latency:latest service` and test with
+`npm --prefix service test`.

@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Harness for measuring Kvasir-to-Aggregator propagation latency",
+  "description": "Mock-pod scale and propagation latency lab for the PACSOI service",
   "bin": {
     "latency-lab": "bin/latency-lab.js"
   },
   "scripts": {
     "start": "node bin/latency-lab.js",
+    "mock:server": "node mock/pod-server.js",
     "test": "node --test test/*.test.js",
     "test:service": "npm --prefix service test",
     "test:all": "npm test && npm run test:service"

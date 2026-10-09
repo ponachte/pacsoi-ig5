@@ -1,59 +1,43 @@
 export type LatencyConfig = {
   podBaseUrls: string[];
-  patientSlice: string;
-  procedureSlice: string;
-  weightSlice: string;
+  sliceName: string;
+  port: number;
 };
 
-function sliceName(variable: string, value: string | undefined): string {
-  const normalized = value?.trim().replace(/^\/+|\/+$/g, "");
-  if (!normalized) throw new Error(`Environment variable ${variable} must be set`);
-  if (normalized.includes("/")) {
-    throw new Error(`Environment variable ${variable} must be a slice name, not a path`);
-  }
-  return normalized;
+function required(environment: NodeJS.ProcessEnv, name: string): string {
+  const value = environment[name]?.trim();
+  if (!value) throw new Error(`Environment variable ${name} must be set`);
+  return value;
 }
 
-export function parsePodSources(value: string | undefined): string[] {
-  if (!value) throw new Error("Environment variable SOURCES must be set");
+function positiveInteger(value: string | undefined, name: string, fallback?: number): number {
+  const parsed = value === undefined && fallback !== undefined ? fallback : Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`Environment variable ${name} must be a positive integer`);
+  return parsed;
+}
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    throw new Error("Environment variable SOURCES must be a JSON array of pod base URLs");
-  }
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error("Environment variable SOURCES must be a non-empty JSON array");
-  }
-
-  const sources = parsed.map((entry, index) => {
-    if (typeof entry !== "string" || !entry.trim()) {
-      throw new Error(`SOURCES[${index}] must be a non-empty URL string`);
-    }
-    let url: URL;
-    try {
-      url = new URL(entry.trim());
-    } catch {
-      throw new Error(`SOURCES[${index}] is not a valid URL`);
-    }
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      throw new Error(`SOURCES[${index}] must use http or https`);
-    }
-    return url.href.replace(/\/+$/, "");
-  });
-
-  if (new Set(sources).size !== sources.length) {
-    throw new Error("Environment variable SOURCES must not contain duplicate pod URLs");
-  }
-  return sources;
+export function buildPodSources(serverUrl: string, prefix: string, count: number): string[] {
+  let base: URL;
+  try { base = new URL(serverUrl); } catch { throw new Error("Environment variable POD_SERVER_URL must be an absolute URL"); }
+  if (!["http:", "https:"].includes(base.protocol)) throw new Error("POD_SERVER_URL must use HTTP or HTTPS");
+  const normalized = base.href.replace(/\/$/, "");
+  const width = Math.max(3, String(count).length);
+  return Array.from({ length: count }, (_, index) =>
+    `${normalized}/${encodeURIComponent(`${prefix}${String(index + 1).padStart(width, "0")}`)}`
+  );
 }
 
 export function readConfig(environment: NodeJS.ProcessEnv = process.env): LatencyConfig {
+  const count = positiveInteger(environment.POD_COUNT, "POD_COUNT");
+  const sliceName = environment.SLICE_NAME?.trim().replace(/^\/+|\/+$/g, "") || "pacsoi-latency";
+  if (sliceName.includes("/")) throw new Error("SLICE_NAME must be a name, not a path");
   return {
-    podBaseUrls: parsePodSources(environment.SOURCES),
-    patientSlice: sliceName("PATIENT_SLICE", environment.PATIENT_SLICE),
-    procedureSlice: sliceName("BAR_PROCEDURE_SLICE", environment.BAR_PROCEDURE_SLICE),
-    weightSlice: sliceName("WEIGHT_SLICE", environment.WEIGHT_SLICE),
+    podBaseUrls: buildPodSources(
+      required(environment, "POD_SERVER_URL"),
+      environment.POD_PREFIX?.trim() || "latency",
+      count,
+    ),
+    sliceName,
+    port: positiveInteger(environment.PORT, "PORT", 3000),
   };
 }

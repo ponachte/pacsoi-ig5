@@ -20,13 +20,11 @@ function source(baseUrl: string, slice: string, schema: string): Source {
 
 export function attachPodSources(
   podBaseUrls: string[],
-  slices: { patient: string; procedure: string; weight: string },
-  patients: QuerySourceIterator,
+  slices: { procedure: string; weight: string },
   procedures: QuerySourceIterator,
   weights: QuerySourceIterator,
 ) {
   for (const baseUrl of podBaseUrls) {
-    patients.addSource(source(baseUrl, slices.patient, Schemas.PATIENT_SCHEMA));
     procedures.addSource(source(baseUrl, slices.procedure, Schemas.PROCEDURE_SCHEMA));
     weights.addSource(source(baseUrl, slices.weight, Schemas.WEIGHT_SCHEMA));
   }
@@ -40,23 +38,16 @@ async function bindings(query: string, sources: QuerySourceIterator) {
 }
 
 export async function startStreams(
-  patients: QuerySourceIterator,
   procedures: QuerySourceIterator,
   weights: QuerySourceIterator,
   distribution: WeightDistribution,
   mutex: Mutex,
 ) {
-  const [patientStream, procedureStream, weightStream] = await Promise.all([
-    bindings(Schemas.PATIENT_QUERY, patients),
+  const [procedureStream, weightStream] = await Promise.all([
     bindings(Schemas.PROCEDURE_QUERY, procedures),
     bindings(Schemas.WEIGHT_QUERY, weights),
   ]);
 
-  patientStream.on("data", async (binding) => {
-    if (isAddition(binding) && binding.has("patient")) {
-      await mutex.runExclusive(() => distribution.addPatient(binding.get("patient").value));
-    }
-  });
   procedureStream.on("data", async (binding) => {
     if (isAddition(binding) && binding.has("patient") && binding.has("timestamp")) {
       await mutex.runExclusive(() => distribution.addProcedure(
@@ -76,7 +67,6 @@ export async function startStreams(
   });
 
   for (const [name, stream] of [
-    ["patient", patientStream],
     ["procedure", procedureStream],
     ["weight", weightStream],
   ] as const) {

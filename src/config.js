@@ -15,21 +15,19 @@ function positiveInteger(key, value) {
 
 export function validateConfig(input) {
   const config = structuredClone(input);
-  config.kvasir ??= {};
-  config.aggregator ??= {};
+  config.mock ??= {};
+  config.service ??= {};
   config.experiment ??= {};
 
-  config.kvasir.serverUrl = required(config, "kvasir.serverUrl", config.kvasir.serverUrl).replace(/\/$/, "");
-  config.kvasir.clientId = required(config, "kvasir.clientId", config.kvasir.clientId);
-  config.kvasir.clientSecret = required(config, "kvasir.clientSecret", config.kvasir.clientSecret);
-  config.aggregator.serverUrl = required(config, "aggregator.serverUrl", config.aggregator.serverUrl).replace(/\/$/, "");
-  config.aggregator.deploymentFunction = required(config, "aggregator.deploymentFunction", config.aggregator.deploymentFunction);
-  config.aggregator.serviceName = required(config, "aggregator.serviceName", config.aggregator.serviceName);
-  config.aggregator.sourceParameter = config.aggregator.sourceParameter || "sources";
-  config.aggregator.weightPath = (config.aggregator.weightPath || "w-dist").replace(/^\/+|\/+$/g, "");
+  config.mock.serverUrl = required(config, "mock.serverUrl", config.mock.serverUrl).replace(/\/$/, "");
+  config.service.serverUrl = required(config, "service.serverUrl", config.service.serverUrl).replace(/\/$/, "");
   config.experiment.podPrefix = config.experiment.podPrefix || "latency";
   config.experiment.sliceName = config.experiment.sliceName || "pacsoi-latency";
   config.experiment.podCount = positiveInteger("experiment.podCount", config.experiment.podCount ?? 1);
+  config.experiment.initialObservationsPerPod = positiveInteger(
+    "experiment.initialObservationsPerPod",
+    config.experiment.initialObservationsPerPod ?? 1,
+  );
   config.experiment.iterations = positiveInteger("experiment.iterations", config.experiment.iterations ?? 5);
   config.experiment.minObservationsPerPod = positiveInteger("experiment.minObservationsPerPod", config.experiment.minObservationsPerPod ?? 1);
   config.experiment.maxObservationsPerPod = positiveInteger("experiment.maxObservationsPerPod", config.experiment.maxObservationsPerPod ?? 5);
@@ -38,6 +36,11 @@ export function validateConfig(input) {
   }
   config.experiment.pollIntervalMs = positiveInteger("experiment.pollIntervalMs", config.experiment.pollIntervalMs ?? 100);
   config.experiment.timeoutMs = positiveInteger("experiment.timeoutMs", config.experiment.timeoutMs ?? 60_000);
+  config.experiment.writeConcurrency = positiveInteger("experiment.writeConcurrency", config.experiment.writeConcurrency ?? 100);
+  config.experiment.resourceSampleIntervalMs = positiveInteger(
+    "experiment.resourceSampleIntervalMs",
+    config.experiment.resourceSampleIntervalMs ?? 250,
+  );
   return config;
 }
 
