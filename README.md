@@ -74,6 +74,38 @@ checks the service configuration, runs the benchmark, and shuts both processes
 down. A failed attempt is cleaned up and retried according to `retryCount`.
 Managed mode currently requires local `http://localhost` or `127.0.0.1` URLs.
 
+### Run a managed experiment in the background with tmux
+
+On a VM, start the experiment inside a `tmux` session so it can continue after
+disconnecting from SSH. From the repository directory:
+
+```sh
+tmux new -s pacsoi-experiment
+mkdir -p results
+node bin/latency-lab.js experiment > results/experiment-console.log 2>&1
+```
+
+Detach without stopping the experiment by pressing **Ctrl+B**, then **D**.
+Reconnect to the session later with:
+
+```sh
+tmux attach -t pacsoi-experiment
+```
+
+To follow the output from another shell without attaching:
+
+```sh
+tail -f results/experiment-console.log
+```
+
+The experiment writes its timestamped `experiment-*` directory, including
+`summary.json` and `report.html`, under `results/` when it completes. List the
+most recent experiment directory with:
+
+```sh
+ls -td results/experiment-* | head -n 1
+```
+
 The mock must be reset before starting the service. Resetting while incremental
 subscriptions are connected is rejected to prevent mixed experiment state.
 

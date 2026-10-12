@@ -352,8 +352,23 @@ export async function runFullExperiment(config) {
         failures.push(failure);
         attempts.push({ ...failure, status: "failure", output: error.runOutput, log: error.runLog, mockLog: error.mockLog });
         console.error(
-          `[experiment ${repetition}] attempt ${attempt} failed: ${error.message}\n` +
-          JSON.stringify(errorDetails(error)),
+          `[experiment ${repetition}] attempt ${attempt} failed ` +
+          `(classification=${detail.kind}${detail.serviceOomLogObservedAt
+            ? `, oomLogObservedAt=${detail.serviceOomLogObservedAt}`
+            : ""}): ${error.message}\n` +
+          JSON.stringify({
+            ...errorDetails(error),
+            classification: detail.kind,
+            ...(detail.serviceOomLogObservedAt
+              ? { serviceOomLogObservedAt: detail.serviceOomLogObservedAt }
+              : {}),
+            ...(detail.serviceExitedAt ? { serviceExitedAt: detail.serviceExitedAt } : {}),
+            ...(detail.serviceOomLogEvidence
+              ? { serviceOomLogEvidence: detail.serviceOomLogEvidence }
+              : {}),
+            ...(detail.serviceExitCode !== undefined ? { serviceExitCode: detail.serviceExitCode } : {}),
+            ...(detail.serviceSignal ? { serviceSignal: detail.serviceSignal } : {}),
+          }),
         );
       }
     }

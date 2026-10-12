@@ -47,9 +47,13 @@ test("generates a self-contained bootstrap experiment report", async (t) => {
 });
 
 test("classifies Node heap exhaustion and extracts the detected heap size", () => {
-  const result = classifyFailureLog("Mark-Compact 3900 (4129.3) MB\nFATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory");
+  const result = classifyFailureLog([
+    "Mark-Compact 3949.4 (4132.0) -> 3934.8 (4133.3) MB, 2001.67 ms allocation failure; scavenge might not succeed",
+    "Mark-Compact 3951.2 (4133.8) -> 3936.5 (4135.0) MB, 2066.32 ms allocation failure; scavenge might not succeed",
+    "FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory",
+  ].join("\n"));
   assert.equal(result.kind, "out-of-memory");
-  assert.equal(result.detectedHeapMiB, 4129.3);
+  assert.equal(result.detectedHeapMiB, 4135);
 });
 
 test("records when a managed child emits Node's fatal heap error", async (t) => {
