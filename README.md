@@ -1,8 +1,7 @@
 # PACSOI IG5 mock-pod scale lab
 
 This repository measures a standalone PACSOI aggregation service against a
-single-process virtual pod server. It has no external Kvasir or Aggregator
-dependency.
+single-process virtual pod server.
 
 The experiment answers two questions:
 
@@ -23,7 +22,12 @@ The important experiment settings are:
 - `podCount`: number of virtual pods;
 - `initialObservationsPerPod`: weights present before the service starts;
 - `iterations`: number of change rounds;
-- `minObservationsPerPod` and `maxObservationsPerPod`: additions per pod/round;
+- `repetitions`: number of independent runs in a full experiment;
+- `retryCount`: automatic clean restarts allowed after a failed repetition;
+- `observationsPerPodPerRound`: the exact number of additions sent to every pod in every round;
+- `bootstrapIterations`: offline resamples used for confidence intervals;
+- `bootstrapConfidenceLevel`: confidence level, normally `0.95`;
+- `bootstrapSeed`: makes regenerated statistical results reproducible;
 - `writeConcurrency`: maximum simultaneous change requests; and
 - `resourceSampleIntervalMs`: service metrics sampling interval.
 
@@ -55,6 +59,18 @@ Then validate and run:
 node bin/latency-lab.js check
 node bin/latency-lab.js run
 ```
+
+Or run the complete, managed experiment with no separately started processes:
+
+```sh
+node bin/latency-lab.js experiment
+```
+
+This builds the service once, then starts a fresh mock and service for every
+repetition. It waits for their health endpoints, resets and verifies the mock,
+checks the service configuration, runs the benchmark, and shuts both processes
+down. A failed attempt is cleaned up and retried according to `retryCount`.
+Managed mode currently requires local `http://localhost` or `127.0.0.1` URLs.
 
 The mock must be reset before starting the service. Resetting while incremental
 subscriptions are connected is rejected to prevent mixed experiment state.
@@ -113,6 +129,32 @@ have `type: "round"` and report CPU consumed during that round.
 The mock exposes `/health`, `/configuration`, and `/metrics`. The service exposes
 `/health`, `/metrics`, and `/w-dist`.
 
+A full experiment writes one NDJSON file plus separate mock and service logs per attempt,
+plus `summary.json` and `report.html` under `results/experiment-*`. Latency,
+resource, and throughput metrics contain p50, p90, p95, and p99 estimates with
+reproducible percentile-bootstrap confidence intervals. Experiment repetitions
+are the independent resampling unit and rounds are never mixed. Means and sample
+standard deviations remain secondary diagnostics. Tail estimates receive a
+warning when too few independent repetitions support them. Failed attempts and
+their Wilson-score failure-rate interval remain visible even when a retry succeeds.
+An exhausted repetition does not stop later repetitions. Completed rounds from
+partial attempts remain in the per-round statistics, so the sample count can
+decline at higher triple counts. Each failure records its stage and round, the
+last fully completed triple count, the mock-observed triple count when failure
+was detected, the last service-observed processed triple count, and whether the
+service log contains a Node.js out-of-memory error. Together these distinguish
+the exact safe round boundary, the latest sampled Incremunica state, and the
+accepted-input upper bound at the moment failure was detected.
+JavaScript heap exhaustion is classified from the service log. A bare `SIGKILL`
+is reported separately as `process-killed`, since it may indicate the operating
+system OOM killer but is not sufficient evidence to label it definitively.
+
+All generated input data is deterministic. Observation and result identifiers
+are derived from pod, round, and observation index; weights vary deterministically
+by numeric pod sequence, round, and index; and procedure/observation timestamps
+are fixed functions of their indexes. Repeated experiments therefore send the
+same payload data.
+
 ## Scale expectations
 
 Virtual pod definitions are lazy: declaring 10,000 pods does not create 10,000
@@ -131,6 +173,13 @@ identify the point where memory, CPU, or event-loop delay starts growing sharply
 latency-lab mock reset
 latency-lab check
 latency-lab run
+latency-lab experiment
+latency-lab report results/run-*.ndjson --error results/error.txt
 ```
+
+The `report` command streams one run file and creates a self-contained offline
+HTML report beside it. It includes summary cards, latency, memory, CPU,
+event-loop pressure, workload, throughput, per-pod write percentiles, a sortable
+round table, and an optional failure annotation.
 
 Run all tests with `npm run test:all`.

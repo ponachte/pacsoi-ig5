@@ -1,4 +1,3 @@
-import { randomInt } from "node:crypto";
 import { expectResponse } from "../http.js";
 import { podIds } from "../inventory.js";
 import { initialWeightValue, roundPodData } from "./data.js";
@@ -52,11 +51,13 @@ export async function writeObservationRound(config, round, fetchImpl = fetch) {
     while (next < ids.length) {
       const index = next;
       next += 1;
-      const count = randomInt(
-        config.experiment.minObservationsPerPod,
-        config.experiment.maxObservationsPerPod + 1,
+      results[index] = await submitPodChange(
+        config,
+        ids[index],
+        round,
+        config.experiment.observationsPerPodPerRound,
+        fetchImpl,
       );
-      results[index] = await submitPodChange(config, ids[index], round, count, fetchImpl);
     }
   });
   await Promise.all(workers);

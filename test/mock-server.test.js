@@ -18,6 +18,7 @@ test("10,000 virtual pods allocate no pod state before use", async (t) => {
   const metrics = await (await fetch(`${base}/metrics`)).json();
   assert.equal(metrics.podCount, 10_000);
   assert.equal(metrics.materializedPods, 0);
+  assert.equal(metrics.triples, 0);
   assert.ok(metrics.memory.heapUsed < 100 * 1024 * 1024);
 });
 
@@ -32,6 +33,9 @@ test("initial query returns seeded procedure and weight data", async (t) => {
   assert.equal(body.data.bariatricProcedures.length, 1);
   assert.equal(body.data.weightObservations.length, 2);
   assert.equal(body.data.bariatricProcedures[0].subject, `${base}/latency00001/patients/main`);
+  const metrics = await (await fetch(`${base}/metrics`)).json();
+  assert.equal(metrics.observations, 2);
+  assert.equal(metrics.triples, 20);
 });
 
 test("round changes are published once over the incremental stream", async (t) => {

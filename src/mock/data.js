@@ -1,8 +1,16 @@
-import { randomUUID } from "node:crypto";
-
 export const WEIGHT_PROPERTY = "http://snomed.info/id/27113001";
 export const BARIATRIC_PROCEDURE = "http://snomed.info/id/442338001";
 export const PROCEDURE_AT = "2020-01-15T10:00:00.000Z";
+
+// The GraphQL-LD schemas materialize four triples for a procedure and eight
+// for every weight observation (four for the observation and four for its
+// result node).
+export const PROCEDURE_TRIPLES = 4;
+export const WEIGHT_OBSERVATION_TRIPLES = 8;
+
+export function tripleCount(podCount, observationCount) {
+  return podCount * PROCEDURE_TRIPLES + observationCount * WEIGHT_OBSERVATION_TRIPLES;
+}
 
 export function patientUrl(serverUrl, podId) {
   return `${serverUrl.replace(/\/$/, "")}/${encodeURIComponent(podId)}/patients/main`;
@@ -33,13 +41,16 @@ export function initialPodData(serverUrl, podId, podNumber, observationCount) {
 
 export function roundPodData(serverUrl, podId, round, observationCount) {
   const patient = patientUrl(serverUrl, podId);
+  const suffix = podId.match(/(\d+)$/)?.[1];
+  if (!suffix) throw new Error(`Pod ID must end in a numeric sequence: ${podId}`);
+  const podNumber = Number(suffix);
   const observations = Array.from({ length: observationCount }, (_, index) => observation(
     serverUrl,
     podId,
     patient,
-    Number((80 + round * 2 + index / 10 + podId.length / 100).toFixed(2)),
+    Number((80 + round * 2 + (podNumber % 100) / 100 + index / 10).toFixed(2)),
     `2020-02-${String(Math.min(28, round + index + 1)).padStart(2, "0")}T10:00:00.000Z`,
-    randomUUID(),
+    `round-${round}-observation-${index + 1}`,
   ));
   return { observations, values: observations.map((item) => item.sosa_hasResult.saref_hasValue) };
 }

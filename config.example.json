@@ -11,11 +11,17 @@
     "sliceName": "pacsoi-latency",
     "initialObservationsPerPod": 1,
     "iterations": 5,
-    "minObservationsPerPod": 1,
-    "maxObservationsPerPod": 5,
+    "repetitions": 5,
+    "retryCount": 1,
+    "observationsPerPodPerRound": 1,
+    "bootstrapIterations": 10000,
+    "bootstrapConfidenceLevel": 0.95,
+    "bootstrapSeed": 20261012,
     "pollIntervalMs": 100,
     "timeoutMs": 360000,
     "writeConcurrency": 100,
-    "resourceSampleIntervalMs": 250
+    "resourceSampleIntervalMs": 250,
+    "startupTimeoutMs": 360000,
+    "shutdownTimeoutMs": 10000
   }
 }

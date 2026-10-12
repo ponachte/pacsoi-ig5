@@ -2,7 +2,12 @@
 import http from "node:http";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
-import { initialPodData, WEIGHT_PROPERTY, BARIATRIC_PROCEDURE } from "../src/mock/data.js";
+import {
+  initialPodData,
+  tripleCount,
+  WEIGHT_PROPERTY,
+  BARIATRIC_PROCEDURE,
+} from "../src/mock/data.js";
 
 function json(reply, status, body) {
   reply.writeHead(status, { "Content-Type": "application/json" });
@@ -79,10 +84,13 @@ export function createMockPodServer(options = {}) {
           (sum, pod) => sum + pod.subscribers.procedure.size + pod.subscribers.observation.size,
           0,
         );
+        const observations = [...pods.values()].reduce((sum, pod) => sum + pod.observations.length, 0);
         return json(reply, 200, {
           ...counters,
           ...settings,
           materializedPods: pods.size,
+          observations,
+          triples: tripleCount(pods.size, observations),
           subscriptions,
           memory: process.memoryUsage(),
         });

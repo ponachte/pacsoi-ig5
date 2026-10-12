@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseWeightCsv, resourceSummary, weightSnapshot } from "../src/benchmark/runner.js";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { parseWeightCsv, resourceSummary, runExperiment, weightSnapshot } from "../src/benchmark/runner.js";
 
 test("PACSOI weight CSV is parsed into a cumulative completion snapshot", () => {
   const csv = "month,avg_weight,stdev,q25,q75,count\n1,82.50,0.50,82.25,82.75,2";
@@ -35,4 +38,42 @@ test("service resource samples are summarized for each round", () => {
     cpuSystemMicros: 10,
     samples,
   });
+});
+
+test("records the observed triple count when the service fails during startup", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pacsoi-failed-run-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const output = path.join(directory, "failed.ndjson");
+  const metrics = {
+    uptimeSeconds: 1,
+    process: { rss: 100, maxRssBytes: 100, heapUsed: 50, cpuUserMicros: 1, cpuSystemMicros: 1 },
+    eventLoop: { p95Ms: 1 },
+  };
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/metrics") && url.startsWith("http://service")) {
+      return new Response(JSON.stringify(metrics), { status: 200 });
+    }
+    if (url.endsWith("/w-dist")) throw new Error("service process exited");
+    if (url.endsWith("/metrics") && url.startsWith("http://mock")) {
+      return new Response(JSON.stringify({ observations: 1, triples: 12 }), { status: 200 });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+  const config = {
+    mock: { serverUrl: "http://mock" }, service: { serverUrl: "http://service" },
+    experiment: {
+      podCount: 1, initialObservationsPerPod: 1, resourceSampleIntervalMs: 1000,
+      timeoutMs: 1000, pollIntervalMs: 1, iterations: 1,
+    },
+  };
+
+  await assert.rejects(runExperiment(config, fetchImpl, { output, repetition: 2 }), /service process exited/);
+  const records = (await fs.readFile(output, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(records, [{
+    type: "failure", repetition: 2, failedAt: records[0].failedAt, stage: "startup",
+    lastCompletedRound: 0, lastCompletedObservations: 0, lastCompletedTriples: 0,
+    observationsAtFailure: 1, triplesAtFailure: 12,
+    serviceMetricsObservedAt: records[0].serviceMetricsObservedAt,
+    mockMetrics: { observations: 1, triples: 12 }, error: "service process exited",
+  }]);
 });

@@ -13,6 +13,18 @@ function positiveInteger(key, value) {
   return value;
 }
 
+function nonNegativeInteger(key, value) {
+  if (!Number.isInteger(value) || value < 0) throw new Error(`${key} must be a non-negative integer`);
+  return value;
+}
+
+function probability(key, value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value >= 1) {
+    throw new Error(`${key} must be a number greater than 0 and less than 1`);
+  }
+  return value;
+}
+
 export function validateConfig(input) {
   const config = structuredClone(input);
   config.mock ??= {};
@@ -29,17 +41,43 @@ export function validateConfig(input) {
     config.experiment.initialObservationsPerPod ?? 1,
   );
   config.experiment.iterations = positiveInteger("experiment.iterations", config.experiment.iterations ?? 5);
-  config.experiment.minObservationsPerPod = positiveInteger("experiment.minObservationsPerPod", config.experiment.minObservationsPerPod ?? 1);
-  config.experiment.maxObservationsPerPod = positiveInteger("experiment.maxObservationsPerPod", config.experiment.maxObservationsPerPod ?? 5);
-  if (config.experiment.minObservationsPerPod > config.experiment.maxObservationsPerPod) {
-    throw new Error("experiment.minObservationsPerPod cannot exceed experiment.maxObservationsPerPod");
+  config.experiment.repetitions = positiveInteger("experiment.repetitions", config.experiment.repetitions ?? 5);
+  config.experiment.retryCount = nonNegativeInteger("experiment.retryCount", config.experiment.retryCount ?? 1);
+  for (const legacyKey of ["minObservationsPerPod", "maxObservationsPerPod", "randomSeed"]) {
+    if (legacyKey in config.experiment) {
+      throw new Error(`experiment.${legacyKey} is no longer supported; use experiment.observationsPerPodPerRound`);
+    }
   }
+  config.experiment.observationsPerPodPerRound = positiveInteger(
+    "experiment.observationsPerPodPerRound",
+    config.experiment.observationsPerPodPerRound ?? 1,
+  );
+  config.experiment.bootstrapIterations = positiveInteger(
+    "experiment.bootstrapIterations",
+    config.experiment.bootstrapIterations ?? 10_000,
+  );
+  config.experiment.bootstrapConfidenceLevel = probability(
+    "experiment.bootstrapConfidenceLevel",
+    config.experiment.bootstrapConfidenceLevel ?? 0.95,
+  );
+  config.experiment.bootstrapSeed = nonNegativeInteger(
+    "experiment.bootstrapSeed",
+    config.experiment.bootstrapSeed ?? 20_261_012,
+  );
   config.experiment.pollIntervalMs = positiveInteger("experiment.pollIntervalMs", config.experiment.pollIntervalMs ?? 100);
   config.experiment.timeoutMs = positiveInteger("experiment.timeoutMs", config.experiment.timeoutMs ?? 60_000);
   config.experiment.writeConcurrency = positiveInteger("experiment.writeConcurrency", config.experiment.writeConcurrency ?? 100);
   config.experiment.resourceSampleIntervalMs = positiveInteger(
     "experiment.resourceSampleIntervalMs",
     config.experiment.resourceSampleIntervalMs ?? 250,
+  );
+  config.experiment.startupTimeoutMs = positiveInteger(
+    "experiment.startupTimeoutMs",
+    config.experiment.startupTimeoutMs ?? config.experiment.timeoutMs,
+  );
+  config.experiment.shutdownTimeoutMs = positiveInteger(
+    "experiment.shutdownTimeoutMs",
+    config.experiment.shutdownTimeoutMs ?? 10_000,
   );
   return config;
 }

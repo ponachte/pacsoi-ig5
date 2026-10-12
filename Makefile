@@ -1,4 +1,4 @@
-.PHONY: help test service-test image-build mock-image-build mock-server mock-reset check run
+.PHONY: help test service-test image-build mock-image-build mock-server mock-reset check run experiment
 
 help:
 	@node bin/latency-lab.js help
@@ -26,3 +26,6 @@ check:
 
 run:
 	@node bin/latency-lab.js run
+
+experiment:
+	@node bin/latency-lab.js experiment
