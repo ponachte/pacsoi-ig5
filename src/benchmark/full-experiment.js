@@ -64,19 +64,18 @@ function lifecycleFetch(controller) {
   };
 }
 
-async function stopProcess(child, timeoutMs) {
+export async function stopProcess(child, timeoutMs) {
   if (!child) return;
   child.expectedStop = true;
-  if (child.exitCode !== null) {
+  if (child.exitCode !== null || child.signalCode !== null) {
     await child.logFinished;
     return;
   }
-  const exited = new Promise((resolve) => child.once("exit", resolve));
   child.kill("SIGTERM");
-  const timedOut = await Promise.race([exited.then(() => false), delay(timeoutMs).then(() => true)]);
-  if (timedOut && child.exitCode === null) {
+  const timedOut = await Promise.race([child.exited.then(() => false), delay(timeoutMs).then(() => true)]);
+  if (timedOut && child.exitCode === null && child.signalCode === null) {
     child.kill("SIGKILL");
-    await exited;
+    await child.exited;
   }
   await child.logFinished;
 }
@@ -85,7 +84,11 @@ async function waitForHealth(url, child, timeoutMs, requestTimeoutMs, label, fet
   const started = performance.now();
   let latest;
   while (performance.now() - started < timeoutMs) {
-    if (child.exitCode !== null) throw new Error(`${label} exited during startup with code ${child.exitCode}`);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(
+        `${label} exited during startup with ${child.signalCode ? `signal ${child.signalCode}` : `code ${child.exitCode}`}`,
+      );
+    }
     try {
       const response = await fetchWithTimeout(
         fetchImpl,
