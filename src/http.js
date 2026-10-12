@@ -45,6 +45,7 @@ export function errorDetails(error) {
 export async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs = 30_000, operation = "HTTP request") {
   const controller = new AbortController();
   const started = performance.now();
+  const requestStartedAt = new Date().toISOString();
   const requestId = new Headers(options.headers).get("x-experiment-request-id");
   let timedOut = false;
   let responseReceived = false;
@@ -62,6 +63,7 @@ export async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs =
   const normalizeError = (error, phase) => {
     const elapsedMs = performance.now() - started;
     const outcome = timedOut ? "timeout" : upstream?.aborted ? "aborted" : "network-error";
+    const failedAt = new Date().toISOString();
     const message = timedOut
       ? `${operation} timed out after ${timeoutMs}ms (${url})`
       : upstream?.aborted
@@ -74,6 +76,8 @@ export async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs =
       url,
       method: options.method ?? "GET",
       ...(requestId ? { requestId } : {}),
+      requestStartedAt,
+      failedAt,
       timeoutMs,
       elapsedMs,
       phase,

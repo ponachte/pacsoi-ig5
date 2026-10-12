@@ -42,6 +42,7 @@ export function createMockPodServer(options = {}) {
     clientErrors: 0,
   };
   const lastRequestsBySocket = new WeakMap();
+  const socketsWithCloseListener = new WeakSet();
   const logDiagnostic = (event, details = {}) => {
     server.getConnections((error, connections) => {
       const subscriptions = [...pods.values()].reduce(
@@ -120,15 +121,18 @@ export function createMockPodServer(options = {}) {
     });
     const socketContext = { requestId, method: request.method, url: request.url, route };
     lastRequestsBySocket.set(request.socket, socketContext);
-    request.socket.once("close", (hadError) => {
-      if (lastRequestsBySocket.get(request.socket) === socketContext &&
-          socketContext.route === "change" && hadError) {
-        logDiagnostic("change_socket_closed", {
-          ...requestDetails(),
-          hadError,
-        });
-      }
-    });
+    if (!socketsWithCloseListener.has(request.socket)) {
+      socketsWithCloseListener.add(request.socket);
+      request.socket.once("close", (hadError) => {
+        const lastRequest = lastRequestsBySocket.get(request.socket);
+        if (lastRequest?.route === "change" && hadError) {
+          logDiagnostic("change_socket_closed", {
+            ...lastRequest,
+            hadError,
+          });
+        }
+      });
+    }
     request.on("aborted", () => {
       counters.abortedRequests += 1;
       logDiagnostic("request_aborted", requestDetails());

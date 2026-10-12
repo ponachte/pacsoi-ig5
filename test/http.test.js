@@ -11,7 +11,7 @@ test("aborts a request that never returns headers", async () => {
     (error) => {
       assert.match(error.message, /Read service metrics timed out after 10ms/);
       assert.equal(error.name, "TimeoutError");
-      const { elapsedMs, ...request } = error.request;
+      const { elapsedMs, requestStartedAt, failedAt, ...request } = error.request;
       assert.deepEqual(request, {
         operation: "Read service metrics",
         url: "http://service/metrics",
@@ -20,6 +20,8 @@ test("aborts a request that never returns headers", async () => {
         phase: "response",
         outcome: "timeout",
       });
+      assert.ok(Number.isFinite(Date.parse(requestStartedAt)));
+      assert.ok(Number.isFinite(Date.parse(failedAt)));
       assert.ok(elapsedMs >= 0);
       return true;
     },
@@ -61,6 +63,8 @@ test("adds request and nested network error details when fetch fails", async () 
       assert.match(error.message, /Submit mock change failed .*http:\/\/mock\/pod-1\/changes.*fetch failed/);
       assert.equal(error.request.method, "POST");
       assert.equal(error.request.outcome, "network-error");
+      assert.ok(Number.isFinite(Date.parse(error.request.requestStartedAt)));
+      assert.ok(Number.isFinite(Date.parse(error.request.failedAt)));
       assert.equal(error.cause.code, "UND_ERR_SOCKET");
       assert.equal(error.cause.cause.code, "ECONNRESET");
       return true;
