@@ -77,7 +77,11 @@ test("logs client-aborted change requests with socket, progress, and resource de
   const url = new URL(`${base}/latency00001/changes`);
   const request = http.request(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Content-Length": "100" },
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": "100",
+      "X-Experiment-Request-Id": "test-request-123",
+    },
   });
   request.on("error", () => {});
   request.write("{");
@@ -86,6 +90,7 @@ test("logs client-aborted change requests with socket, progress, and resource de
   const record = await aborted;
   assert.equal(record.method, "POST");
   assert.equal(record.url, "/latency00001/changes");
+  assert.equal(record.requestId, "test-request-123");
   assert.equal(record.route, "change");
   assert.equal(record.requestAborted, true);
   assert.equal(record.acceptedObservations, 0);

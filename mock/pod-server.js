@@ -41,6 +41,7 @@ export function createMockPodServer(options = {}) {
     handlerErrors: 0,
     clientErrors: 0,
   };
+  const lastRequestsBySocket = new WeakMap();
   const logDiagnostic = (event, details = {}) => {
     server.getConnections((error, connections) => {
       const subscriptions = [...pods.values()].reduce(
@@ -95,21 +96,38 @@ export function createMockPodServer(options = {}) {
   }
 
   const server = http.createServer(async (request, reply) => {
-    const requestId = ++counters.requests;
+    const requestNumber = ++counters.requests;
     const started = performance.now();
     let route = "unmatched";
     let acceptedObservations = 0;
+    const requestId = request.headers["x-experiment-request-id"];
     const requestDetails = () => ({
-      requestId,
+      ...(requestId ? { requestId } : {}),
+      requestNumber,
       method: request.method,
       url: request.url,
       remoteAddress: request.socket.remoteAddress,
+      remotePort: request.socket.remotePort,
+      localPort: request.socket.localPort,
+      socketBytesRead: request.socket.bytesRead,
+      socketBytesWritten: request.socket.bytesWritten,
       elapsedMs: Number((performance.now() - started).toFixed(1)),
       route,
       requestComplete: request.complete,
       requestAborted: request.aborted,
       responseStatus: reply.statusCode,
       acceptedObservations,
+    });
+    const socketContext = { requestId, method: request.method, url: request.url, route };
+    lastRequestsBySocket.set(request.socket, socketContext);
+    request.socket.once("close", (hadError) => {
+      if (lastRequestsBySocket.get(request.socket) === socketContext &&
+          socketContext.route === "change" && hadError) {
+        logDiagnostic("change_socket_closed", {
+          ...requestDetails(),
+          hadError,
+        });
+      }
     });
     request.on("aborted", () => {
       counters.abortedRequests += 1;
@@ -133,14 +151,17 @@ export function createMockPodServer(options = {}) {
 
       if (request.method === "GET" && url.pathname === "/health") {
         route = "health";
+        socketContext.route = route;
         return json(reply, 200, { status: "ok", ...settings });
       }
       if (request.method === "GET" && url.pathname === "/configuration") {
         route = "configuration";
+        socketContext.route = route;
         return json(reply, 200, settings);
       }
       if (request.method === "GET" && url.pathname === "/metrics") {
         route = "metrics";
+        socketContext.route = route;
         const subscriptions = [...pods.values()].reduce(
           (sum, pod) => sum + pod.subscribers.procedure.size + pod.subscribers.observation.size,
           0,
@@ -158,6 +179,7 @@ export function createMockPodServer(options = {}) {
       }
       if (request.method === "POST" && url.pathname === "/admin/reset") {
         route = "reset";
+        socketContext.route = route;
         const subscriptions = [...pods.values()].some(
           (pod) => pod.subscribers.procedure.size || pod.subscribers.observation.size,
         );
@@ -184,6 +206,7 @@ export function createMockPodServer(options = {}) {
 
       if (resource === "changes" && request.method === "POST") {
         route = "change";
+        socketContext.route = route;
         const body = await requestBody(request);
         if (!Array.isArray(body.observations)) return json(reply, 400, { error: "observations must be an array" });
         for (const observation of body.observations) {
@@ -202,6 +225,7 @@ export function createMockPodServer(options = {}) {
 
       if (resource === "slices" && segments[3] === "query" && request.method === "POST") {
         route = "query";
+        socketContext.route = route;
         const body = await requestBody(request);
         const query = String(body.query ?? "");
         const selected = selection(query);
@@ -242,11 +266,17 @@ export function createMockPodServer(options = {}) {
   });
   server.on("clientError", (error, socket) => {
     counters.clientErrors += 1;
+    const lastParsedRequest = lastRequestsBySocket.get(socket);
     logDiagnostic("client_error", {
       error: error.message,
       code: error.code,
       remoteAddress: socket.remoteAddress,
       remotePort: socket.remotePort,
+      localAddress: socket.localAddress,
+      localPort: socket.localPort,
+      bytesRead: socket.bytesRead,
+      bytesWritten: socket.bytesWritten,
+      ...(lastParsedRequest ? { lastParsedRequest } : {}),
     });
     socket.destroy();
   });

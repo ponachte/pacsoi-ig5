@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { expectResponse, fetchWithTimeout } from "../http.js";
 import { podIds } from "../inventory.js";
 import { initialWeightValue, roundPodData } from "./data.js";
@@ -28,9 +29,14 @@ export function initialValues(config) {
 export async function submitPodChange(config, podId, round, observationCount, fetchImpl = fetch) {
   const data = roundPodData(config.mock.serverUrl, podId, round, observationCount);
   const started = performance.now();
-  const response = await fetchWithTimeout(fetchImpl, `${config.mock.serverUrl}/${encodeURIComponent(podId)}/changes`, {
+  const url = `${config.mock.serverUrl}/${encodeURIComponent(podId)}/changes`;
+  const requestId = randomUUID();
+  const response = await fetchWithTimeout(fetchImpl, url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Experiment-Request-Id": requestId,
+    },
     body: JSON.stringify({ observations: data.observations }),
   }, config.experiment.requestTimeoutMs ?? 30_000, `Submit mock change for ${podId}`);
   await expectResponse(response, 201, `Submit mock change for ${podId}`);

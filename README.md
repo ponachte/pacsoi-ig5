@@ -159,6 +159,14 @@ time; other fetch failures include the nested Node.js cause and network error
 code when available. The failure record also captures the round phase and
 accepted-pod count, which helps distinguish a slow request from a connection
 reset or refusal during a large write batch.
+Each mock change POST carries a unique `X-Experiment-Request-Id`. The client
+includes that ID in any fetch failure details; mock-side request and socket
+diagnostics log it when the request reaches the HTTP handler. Parser-level
+socket errors also include the most recent parsed request on that socket as
+context, which may be an earlier keep-alive request rather than the malformed
+or reset request itself. Writes are not automatically retried because a socket
+failure can happen after the mock applied a write but before the client received
+its response.
 The experiment controller also watches the managed service and mock processes.
 An unexpected exit immediately aborts the active request, preserves the partial
 run and completed child log, classifies the failure, and starts the next attempt.

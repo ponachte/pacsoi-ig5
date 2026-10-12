@@ -45,6 +45,7 @@ export function errorDetails(error) {
 export async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs = 30_000, operation = "HTTP request") {
   const controller = new AbortController();
   const started = performance.now();
+  const requestId = new Headers(options.headers).get("x-experiment-request-id");
   let timedOut = false;
   let responseReceived = false;
   const timer = setTimeout(() => {
@@ -72,6 +73,7 @@ export async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs =
       operation,
       url,
       method: options.method ?? "GET",
+      ...(requestId ? { requestId } : {}),
       timeoutMs,
       elapsedMs,
       phase,
