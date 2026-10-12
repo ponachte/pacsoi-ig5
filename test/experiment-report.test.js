@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { generateExperimentReport } from "../src/experiment-report.js";
-import { classifyFailureLog, stopProcess, watchProcessExit } from "../src/benchmark/full-experiment.js";
+import { classifyFailureLog, startProcess, stopProcess, watchProcessExit } from "../src/benchmark/full-experiment.js";
 
 function distribution(estimate, lower, upper) {
   return { sampleSize: 10, percentiles: { p50: { estimate, ci: { confidenceLevel: 0.95, lower, upper } } } };
@@ -19,7 +19,12 @@ test("generates a self-contained bootstrap experiment report", async (t) => {
     statistics: { iterations: 10_000, confidenceLevel: 0.95 },
     requestedRepetitions: 10,
     reliability: { attempts: 10, failedAttempts: 1, failureRate: { estimate: 0.1, ci: { lower: 0.02, upper: 0.4 } } },
-    failures: [{ repetition: 3, attempt: 1, kind: "out-of-memory", round: 8, lastCompletedRound: 7, lastCompletedTriples: 1000, serviceTriplesAtLastSample: 1070, triplesAtFailure: 1100, failedAt: "2026-10-12T09:00:00Z" }],
+    failures: [{
+      repetition: 3, attempt: 1, kind: "out-of-memory", round: 8, lastCompletedRound: 7,
+      lastCompletedTriples: 1000, serviceTriplesAtLastSample: 1070, triplesAtFailure: 1100,
+      failedAt: "2026-10-12T09:00:00Z", serviceOomLogObservedAt: "2026-10-12T09:00:15Z",
+      serviceExitedAt: "2026-10-12T09:00:16Z",
+    }],
     outOfMemoryFailures: [{ repetition: 3 }],
     rounds: [{
       round: 1,
@@ -36,6 +41,8 @@ test("generates a self-contained bootstrap experiment report", async (t) => {
   assert.match(html, /Typical run write p95/);
   assert.match(html, /Service triples/);
   assert.match(html, /Mock triples/);
+  assert.match(html, /OOM log observed/);
+  assert.match(html, /2026-10-12T09:00:15Z/);
   assert.doesNotMatch(html, /<script[^>]+src=/);
 });
 
@@ -43,6 +50,23 @@ test("classifies Node heap exhaustion and extracts the detected heap size", () =
   const result = classifyFailureLog("Mark-Compact 3900 (4129.3) MB\nFATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory");
   assert.equal(result.kind, "out-of-memory");
   assert.equal(result.detectedHeapMiB, 4129.3);
+});
+
+test("records when a managed child emits Node's fatal heap error", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pacsoi-oom-log-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const logFile = path.join(directory, "service.log");
+  const child = startProcess(process.execPath, [
+    "-e",
+    "process.stderr.write('FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory\\n')",
+  ], { cwd: directory }, logFile);
+
+  await child.exited;
+  await child.logFinished;
+
+  assert.match(child.oomLogObservedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(child.oomLogEvidence, /FATAL ERROR:.*JavaScript heap out of memory/);
+  assert.match(child.exitedAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
 test("does not wait for another exit when stopping a process that exited by signal", async () => {

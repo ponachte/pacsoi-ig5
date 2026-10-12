@@ -150,6 +150,12 @@ accepted-input upper bound at the moment failure was detected.
 JavaScript heap exhaustion is classified from the service log. A bare `SIGKILL`
 is reported separately as `process-killed`, since it may indicate the operating
 system OOM killer but is not sufficient evidence to label it definitively.
+For a detected JavaScript heap OOM, `summary.json` and the HTML report retain
+the request-failure timestamp, the time the fatal OOM text was observed from the
+service process, and the service exit timestamp as separate values. The log
+observation time is when the experiment controller received the fatal text, not
+the exact instant heap exhaustion began; the failure also records the round,
+accepted workload, last completed round, and latest sampled service workload.
 Every service, mock, and pod-write request has a bounded timeout, including body
 streaming. While a round is running, periodic output identifies whether it is
 writing, propagating, or finalizing and reports elapsed time and accepted pods.

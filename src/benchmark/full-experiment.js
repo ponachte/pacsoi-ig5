@@ -27,13 +27,27 @@ function localAddress(serverUrl, label) {
   return { host, port: Number(url.port || 80) };
 }
 
-function startProcess(command, args, options, logFile) {
+export function startProcess(command, args, options, logFile) {
   const output = fs.createWriteStream(logFile, { flags: "a" });
   const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
   child.stdout.pipe(output);
   child.stderr.pipe(output);
   child.once("close", () => output.end());
-  child.exited = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+  child.startedAt = new Date().toISOString();
+  const observeLog = (chunk) => {
+    child.oomScanBuffer = `${child.oomScanBuffer ?? ""}${chunk.toString("utf8")}`.slice(-8192);
+    if (!child.oomLogObservedAt &&
+        /FATAL ERROR:[^\r\n]*(?:heap out of memory|heap limit|allocation failed)|FATAL ERROR:[\s\S]{0,256}JavaScript heap out of memory/i.test(child.oomScanBuffer)) {
+      child.oomLogObservedAt = new Date().toISOString();
+      child.oomLogEvidence = child.oomScanBuffer.match(/FATAL ERROR:[\s\S]{0,256}/i)?.[0].trim();
+    }
+  };
+  child.stdout.on("data", observeLog);
+  child.stderr.on("data", observeLog);
+  child.exited = new Promise((resolve) => child.once("exit", (code, signal) => {
+    child.exitedAt = new Date().toISOString();
+    resolve({ code, signal, exitedAt: child.exitedAt });
+  }));
   child.logFinished = new Promise((resolve) => output.once("finish", resolve));
   return child;
 }
@@ -46,6 +60,7 @@ export function watchProcessExit(child, label, logFile, controller) {
     error.processLabel = label;
     error.processExitCode = code;
     error.processSignal = signal;
+    error.processExitedAt = child.exitedAt;
     if (!controller.signal.aborted) controller.abort(error);
     return error;
   });
@@ -183,8 +198,13 @@ async function runManagedTrial(config, repetition, attempt, directory) {
     if (runError) {
       runError.serviceExitCode = service?.exitCode;
       runError.serviceSignal = service?.signalCode;
+      runError.serviceStartedAt = service?.startedAt;
+      runError.serviceOomLogObservedAt = service?.oomLogObservedAt;
+      runError.serviceOomLogEvidence = service?.oomLogEvidence;
+      runError.serviceExitedAt = service?.exitedAt;
       runError.mockExitCode = mock?.exitCode;
       runError.mockSignal = mock?.signalCode;
+      runError.mockExitedAt = mock?.exitedAt;
     }
   }
 }
@@ -229,8 +249,13 @@ async function inspectFailure(error) {
     errorDetails: errorDetails(error),
     serviceExitCode: error.serviceExitCode,
     serviceSignal: error.serviceSignal,
+    ...(error.serviceStartedAt ? { serviceStartedAt: error.serviceStartedAt } : {}),
+    ...(error.serviceOomLogObservedAt ? { serviceOomLogObservedAt: error.serviceOomLogObservedAt } : {}),
+    ...(error.serviceOomLogEvidence ? { serviceOomLogEvidence: error.serviceOomLogEvidence } : {}),
+    ...(error.serviceExitedAt ? { serviceExitedAt: error.serviceExitedAt } : {}),
     mockExitCode: error.mockExitCode,
     mockSignal: error.mockSignal,
+    ...(error.mockExitedAt ? { mockExitedAt: error.mockExitedAt } : {}),
   };
 }
 
@@ -381,8 +406,17 @@ export async function runFullExperiment(config) {
       repetition: failure.repetition,
       attempt: failure.attempt,
       failedAt: failure.failedAt ?? failure.observedAt,
+      requestFailedAt: failure.failedAt ?? failure.observedAt,
+      failureRecordedAt: failure.observedAt,
+      serviceStartedAt: failure.serviceStartedAt,
+      oomLogObservedAt: failure.serviceOomLogObservedAt,
+      serviceExitedAt: failure.serviceExitedAt,
+      serviceOomLogEvidence: failure.serviceOomLogEvidence,
+      serviceExitCode: failure.serviceExitCode,
+      serviceSignal: failure.serviceSignal,
       stage: failure.stage,
       round: failure.round,
+      roundProgress: failure.roundProgress,
       lastCompletedRound: failure.lastCompletedRound,
       lastCompletedTriples: failure.lastCompletedTriples,
       serviceTriplesAtLastSample: failure.serviceTriplesAtLastSample,
