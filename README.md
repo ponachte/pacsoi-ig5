@@ -153,6 +153,12 @@ system OOM killer but is not sufficient evidence to label it definitively.
 Every service, mock, and pod-write request has a bounded timeout, including body
 streaming. While a round is running, periodic output identifies whether it is
 writing, propagating, or finalizing and reports elapsed time and accepted pods.
+`requestTimeoutMs` is the limit for one HTTP request, not the limit for a whole
+round. Timeout failures identify the operation, URL, request phase, and elapsed
+time; other fetch failures include the nested Node.js cause and network error
+code when available. The failure record also captures the round phase and
+accepted-pod count, which helps distinguish a slow request from a connection
+reset or refusal during a large write batch.
 The experiment controller also watches the managed service and mock processes.
 An unexpected exit immediately aborts the active request, preserves the partial
 run and completed child log, classifies the failure, and starts the next attempt.

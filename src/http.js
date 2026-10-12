@@ -18,9 +18,35 @@ export function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function causeDetails(error, depth = 0) {
+  if (!(error instanceof Error) || depth >= 5) return undefined;
+  const details = {
+    name: error.name,
+    message: error.message,
+    ...(error.code === undefined ? {} : { code: error.code }),
+    ...(error.errno === undefined ? {} : { errno: error.errno }),
+    ...(error.syscall === undefined ? {} : { syscall: error.syscall }),
+    ...(error.address === undefined ? {} : { address: error.address }),
+    ...(error.port === undefined ? {} : { port: error.port }),
+  };
+  const cause = causeDetails(error.cause, depth + 1);
+  if (cause) details.cause = cause;
+  return details;
+}
+
+export function errorDetails(error) {
+  if (!(error instanceof Error)) return { message: String(error) };
+  return {
+    ...causeDetails(error),
+    ...(error.request === undefined ? {} : { request: error.request }),
+  };
+}
+
 export async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs = 30_000, operation = "HTTP request") {
   const controller = new AbortController();
+  const started = performance.now();
   let timedOut = false;
+  let responseReceived = false;
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort(new Error(`${operation} timed out after ${timeoutMs}ms`));
@@ -32,12 +58,30 @@ export async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs =
     clearTimeout(timer);
     if (upstream) upstream.removeEventListener("abort", abortFromUpstream);
   };
-  const normalizeError = (error) => {
-    if (timedOut) return new Error(`${operation} timed out after ${timeoutMs}ms`, { cause: error });
-    return error;
+  const normalizeError = (error, phase) => {
+    const elapsedMs = performance.now() - started;
+    const outcome = timedOut ? "timeout" : upstream?.aborted ? "aborted" : "network-error";
+    const message = timedOut
+      ? `${operation} timed out after ${timeoutMs}ms (${url})`
+      : upstream?.aborted
+        ? `${operation} aborted after ${elapsedMs.toFixed(1)}ms (${url})`
+        : `${operation} failed after ${elapsedMs.toFixed(1)}ms (${url}): ${error.message}`;
+    const wrapped = new Error(message, { cause: error });
+    wrapped.name = timedOut ? "TimeoutError" : "FetchError";
+    wrapped.request = {
+      operation,
+      url,
+      method: options.method ?? "GET",
+      timeoutMs,
+      elapsedMs,
+      phase,
+      outcome,
+    };
+    return wrapped;
   };
   try {
     const response = await fetchImpl(url, { ...options, signal: controller.signal });
+    responseReceived = true;
     if (response.body === null) {
       cleanup();
       return response;
@@ -48,14 +92,15 @@ export async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs =
       Object.defineProperty(response, method, {
         configurable: true,
         value: async (...args) => {
-          try { return await original(...args); } catch (error) { throw normalizeError(error); } finally { cleanup(); }
+          try { return await original(...args); } catch (error) {
+            throw normalizeError(error, "response-body");
+          } finally { cleanup(); }
         },
       });
     }
     return response;
   } catch (error) {
     cleanup();
-    throw normalizeError(error);
+    throw normalizeError(error, responseReceived ? "response-body" : "response");
   }
 }
-

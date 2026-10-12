@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { projectRoot } from "../config.js";
-import { delay, expectResponse, fetchWithTimeout } from "../http.js";
+import { delay, errorDetails, expectResponse, fetchWithTimeout } from "../http.js";
 import { initialValues, writeObservationRound } from "../mock/client.js";
 import { tripleCount, WEIGHT_OBSERVATION_TRIPLES } from "../mock/data.js";
 
@@ -184,6 +184,12 @@ export async function runRound(config, round, cumulativeValues, fetchImpl = fetc
   } catch (error) {
     const samples = await stopSamplerSafely(stopSampling);
     error.lastServiceMetrics = samples.at(-1);
+    error.roundProgress = {
+      phase,
+      acceptedPods,
+      podCount: config.experiment.podCount,
+      elapsedMs: performance.now() - started,
+    };
     throw error;
   } finally {
     clearInterval(progressTimer);
@@ -270,6 +276,7 @@ export async function runExperiment(config, fetchImpl = fetch, options = {}) {
       failedAt: new Date().toISOString(),
       stage,
       round: activeRound || undefined,
+      ...(error.roundProgress ? { roundProgress: error.roundProgress } : {}),
       lastCompletedRound,
       lastCompletedObservations,
       lastCompletedTriples,
@@ -281,6 +288,8 @@ export async function runExperiment(config, fetchImpl = fetch, options = {}) {
         ? tripleCount(servicePatientsAtLastSample, serviceObservationsAtLastSample)
         : undefined,
       mockMetrics,
+      requestTimeoutMs: config.experiment.requestTimeoutMs ?? 30_000,
+      errorDetails: errorDetails(error),
       error: error.message,
     };
     await fs.appendFile(output, `${JSON.stringify(failure)}\n`);

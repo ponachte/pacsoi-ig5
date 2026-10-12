@@ -69,11 +69,20 @@ test("records the observed triple count when the service fails during startup", 
 
   await assert.rejects(runExperiment(config, fetchImpl, { output, repetition: 2 }), /service process exited/);
   const records = (await fs.readFile(output, "utf8")).trim().split("\n").map(JSON.parse);
-  assert.deepEqual(records, [{
-    type: "failure", repetition: 2, failedAt: records[0].failedAt, stage: "startup",
-    lastCompletedRound: 0, lastCompletedObservations: 0, lastCompletedTriples: 0,
-    observationsAtFailure: 1, triplesAtFailure: 12,
-    serviceMetricsObservedAt: records[0].serviceMetricsObservedAt,
-    mockMetrics: { observations: 1, triples: 12 }, error: "service process exited",
-  }]);
+  assert.equal(records.length, 1);
+  const [failure] = records;
+  assert.equal(failure.type, "failure");
+  assert.equal(failure.repetition, 2);
+  assert.equal(failure.stage, "startup");
+  assert.equal(failure.lastCompletedRound, 0);
+  assert.equal(failure.lastCompletedObservations, 0);
+  assert.equal(failure.lastCompletedTriples, 0);
+  assert.equal(failure.observationsAtFailure, 1);
+  assert.equal(failure.triplesAtFailure, 12);
+  assert.deepEqual(failure.mockMetrics, { observations: 1, triples: 12 });
+  assert.equal(failure.requestTimeoutMs, 30_000);
+  assert.match(failure.error, /Read weight distribution failed .*http:\/\/service\/w-dist.*service process exited/);
+  assert.equal(failure.errorDetails.request.operation, "Read weight distribution");
+  assert.equal(failure.errorDetails.request.url, "http://service/w-dist");
+  assert.equal(failure.errorDetails.cause.message, "service process exited");
 });

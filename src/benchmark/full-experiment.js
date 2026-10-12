@@ -4,7 +4,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { check } from "../check.js";
 import { projectRoot } from "../config.js";
-import { delay, fetchWithTimeout } from "../http.js";
+import { delay, errorDetails, fetchWithTimeout } from "../http.js";
 import { resetMock } from "../mock/client.js";
 import { readRun } from "../report.js";
 import { binomialConfidenceInterval, bootstrapRecords, seedForLabel } from "../statistics.js";
@@ -208,6 +208,7 @@ async function inspectFailure(error) {
     ...(error.benchmarkFailure ?? {}),
     ...classification,
     message: error.message,
+    errorDetails: errorDetails(error),
     serviceExitCode: error.serviceExitCode,
     serviceSignal: error.serviceSignal,
   };
@@ -305,7 +306,10 @@ export async function runFullExperiment(config) {
         };
         failures.push(failure);
         attempts.push({ ...failure, status: "failure", output: error.runOutput, log: error.runLog, mockLog: error.mockLog });
-        console.error(`[experiment ${repetition}] attempt ${attempt} failed: ${error.message}`);
+        console.error(
+          `[experiment ${repetition}] attempt ${attempt} failed: ${error.message}\n` +
+          JSON.stringify(errorDetails(error)),
+        );
       }
     }
     if (!completed) {
