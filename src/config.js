@@ -66,6 +66,14 @@ export function validateConfig(input) {
   );
   config.experiment.pollIntervalMs = positiveInteger("experiment.pollIntervalMs", config.experiment.pollIntervalMs ?? 100);
   config.experiment.timeoutMs = positiveInteger("experiment.timeoutMs", config.experiment.timeoutMs ?? 60_000);
+  config.experiment.requestTimeoutMs = positiveInteger(
+    "experiment.requestTimeoutMs",
+    config.experiment.requestTimeoutMs ?? 30_000,
+  );
+  config.experiment.progressIntervalMs = positiveInteger(
+    "experiment.progressIntervalMs",
+    config.experiment.progressIntervalMs ?? 10_000,
+  );
   config.experiment.writeConcurrency = positiveInteger("experiment.writeConcurrency", config.experiment.writeConcurrency ?? 100);
   config.experiment.resourceSampleIntervalMs = positiveInteger(
     "experiment.resourceSampleIntervalMs",

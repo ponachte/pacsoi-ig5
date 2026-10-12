@@ -20,6 +20,8 @@ test("configuration requires only the mock and standalone service", () => {
   assert.equal(config.experiment.bootstrapIterations, 10_000);
   assert.equal(config.experiment.bootstrapConfidenceLevel, 0.95);
   assert.equal(config.experiment.bootstrapSeed, 20_261_012);
+  assert.equal(config.experiment.requestTimeoutMs, 30_000);
+  assert.equal(config.experiment.progressIntervalMs, 10_000);
 });
 
 test("rejects the former random observation range", () => {

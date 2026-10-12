@@ -1,8 +1,8 @@
-import { expectResponse } from "./http.js";
+import { expectResponse, fetchWithTimeout } from "./http.js";
 
 export async function check(config, fetchImpl = fetch) {
   const mock = await expectResponse(
-    await fetchImpl(`${config.mock.serverUrl}/configuration`),
+    await fetchWithTimeout(fetchImpl, `${config.mock.serverUrl}/configuration`, {}, config.experiment.requestTimeoutMs ?? 30_000, "Reach mock pod server"),
     200,
     "Reach mock pod server",
   );
@@ -13,7 +13,7 @@ export async function check(config, fetchImpl = fetch) {
     }
   }
   const service = await expectResponse(
-    await fetchImpl(`${config.service.serverUrl}/health`),
+    await fetchWithTimeout(fetchImpl, `${config.service.serverUrl}/health`, {}, config.experiment.requestTimeoutMs ?? 30_000, "Reach standalone service"),
     200,
     "Reach standalone service",
   );

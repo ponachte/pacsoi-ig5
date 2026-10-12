@@ -18,3 +18,44 @@ export function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+export async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs = 30_000, operation = "HTTP request") {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error(`${operation} timed out after ${timeoutMs}ms`));
+  }, timeoutMs);
+  const upstream = options.signal;
+  const abortFromUpstream = () => controller.abort(upstream.reason);
+  if (upstream) upstream.addEventListener("abort", abortFromUpstream, { once: true });
+  const cleanup = () => {
+    clearTimeout(timer);
+    if (upstream) upstream.removeEventListener("abort", abortFromUpstream);
+  };
+  const normalizeError = (error) => {
+    if (timedOut) return new Error(`${operation} timed out after ${timeoutMs}ms`, { cause: error });
+    return error;
+  };
+  try {
+    const response = await fetchImpl(url, { ...options, signal: controller.signal });
+    if (response.body === null) {
+      cleanup();
+      return response;
+    }
+    for (const method of ["text", "json", "arrayBuffer", "blob", "formData"]) {
+      if (typeof response[method] !== "function") continue;
+      const original = response[method].bind(response);
+      Object.defineProperty(response, method, {
+        configurable: true,
+        value: async (...args) => {
+          try { return await original(...args); } catch (error) { throw normalizeError(error); } finally { cleanup(); }
+        },
+      });
+    }
+    return response;
+  } catch (error) {
+    cleanup();
+    throw normalizeError(error);
+  }
+}
+

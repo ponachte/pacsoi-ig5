@@ -4,7 +4,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { check } from "../check.js";
 import { projectRoot } from "../config.js";
-import { delay } from "../http.js";
+import { delay, fetchWithTimeout } from "../http.js";
 import { resetMock } from "../mock/client.js";
 import { readRun } from "../report.js";
 import { binomialConfidenceInterval, bootstrapRecords, seedForLabel } from "../statistics.js";
@@ -33,12 +33,40 @@ function startProcess(command, args, options, logFile) {
   child.stdout.pipe(output);
   child.stderr.pipe(output);
   child.once("close", () => output.end());
+  child.exited = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
   child.logFinished = new Promise((resolve) => output.once("finish", resolve));
   return child;
 }
 
+export function watchProcessExit(child, label, logFile, controller) {
+  return child.exited.then(({ code, signal }) => {
+    if (child.expectedStop) return new Promise(() => {});
+    const reason = `${label} exited unexpectedly with ${signal ? `signal ${signal}` : `code ${code}`}`;
+    const error = new Error(`${reason}; see ${logFile}`);
+    error.processLabel = label;
+    error.processExitCode = code;
+    error.processSignal = signal;
+    if (!controller.signal.aborted) controller.abort(error);
+    return error;
+  });
+}
+
+function lifecycleFetch(controller) {
+  return async (url, options = {}) => {
+    const signals = [options.signal, controller.signal].filter(Boolean);
+    const signal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+    try {
+      return await fetch(url, { ...options, signal });
+    } catch (error) {
+      if (controller.signal.aborted) throw controller.signal.reason;
+      throw error;
+    }
+  };
+}
+
 async function stopProcess(child, timeoutMs) {
   if (!child) return;
+  child.expectedStop = true;
   if (child.exitCode !== null) {
     await child.logFinished;
     return;
@@ -53,16 +81,23 @@ async function stopProcess(child, timeoutMs) {
   await child.logFinished;
 }
 
-async function waitForHealth(url, child, timeoutMs, label) {
+async function waitForHealth(url, child, timeoutMs, requestTimeoutMs, label, fetchImpl = fetch) {
   const started = performance.now();
   let latest;
   while (performance.now() - started < timeoutMs) {
     if (child.exitCode !== null) throw new Error(`${label} exited during startup with code ${child.exitCode}`);
     try {
-      const response = await fetch(url);
+      const response = await fetchWithTimeout(
+        fetchImpl,
+        url,
+        {},
+        Math.min(requestTimeoutMs, Math.max(1, timeoutMs - (performance.now() - started))),
+        `Reach ${label}`,
+      );
       if (response.ok) return response.json();
       latest = `HTTP ${response.status}`;
     } catch (error) {
+      if (error.processLabel) throw error;
       latest = error.message;
     }
     await delay(100);
@@ -87,13 +122,20 @@ async function runManagedTrial(config, repetition, attempt, directory) {
   let mock;
   let service;
   let runError;
+  const lifecycle = new AbortController();
+  const managedFetch = lifecycleFetch(lifecycle);
+  const exitFailures = [];
   try {
     mock = startProcess(process.execPath, [
       "mock/pod-server.js", `--host=${mockAddress.host}`, `--port=${mockAddress.port}`,
       `--public-url=${config.mock.serverUrl}`,
     ], { cwd: projectRoot }, mockLog);
-    await waitForHealth(`${config.mock.serverUrl}/health`, mock, config.experiment.startupTimeoutMs, "mock server");
-    await resetMock(config);
+    exitFailures.push(watchProcessExit(mock, "mock server", mockLog, lifecycle));
+    await waitForHealth(
+      `${config.mock.serverUrl}/health`, mock, config.experiment.startupTimeoutMs,
+      config.experiment.requestTimeoutMs, "mock server", managedFetch,
+    );
+    await resetMock(config, managedFetch);
 
     service = startProcess(process.execPath, ["service/dist/index.js"], {
       cwd: projectRoot,
@@ -106,10 +148,25 @@ async function runManagedTrial(config, repetition, attempt, directory) {
         PORT: String(serviceAddress.port),
       },
     }, serviceLog);
-    await waitForHealth(`${config.service.serverUrl}/health`, service, config.experiment.startupTimeoutMs, "service");
-    await check(config);
+    exitFailures.push(watchProcessExit(service, "service", serviceLog, lifecycle));
+    await waitForHealth(
+      `${config.service.serverUrl}/health`, service, config.experiment.startupTimeoutMs,
+      config.experiment.requestTimeoutMs, "service", managedFetch,
+    );
+    await check(config, managedFetch);
 
-    await runExperiment(config, fetch, { output, repetition });
+    const run = runExperiment(config, managedFetch, { output, repetition, diagnosticFetchImpl: fetch });
+    try {
+      await Promise.race([run, ...exitFailures.map((exit) => exit.then((error) => { throw error; }))]);
+    } catch (error) {
+      if (!lifecycle.signal.aborted) lifecycle.abort(error);
+      try {
+        await run;
+      } catch (runErrorWithPartialRecord) {
+        throw runErrorWithPartialRecord;
+      }
+      throw error;
+    }
     return { repetition, attempt, output, log: serviceLog, mockLog };
   } catch (error) {
     runError = error;

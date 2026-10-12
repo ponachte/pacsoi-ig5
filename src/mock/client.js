@@ -1,9 +1,9 @@
-import { expectResponse } from "../http.js";
+import { expectResponse, fetchWithTimeout } from "../http.js";
 import { podIds } from "../inventory.js";
 import { initialWeightValue, roundPodData } from "./data.js";
 
 export async function resetMock(config, fetchImpl = fetch) {
-  const response = await fetchImpl(`${config.mock.serverUrl}/admin/reset`, {
+  const response = await fetchWithTimeout(fetchImpl, `${config.mock.serverUrl}/admin/reset`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -11,7 +11,7 @@ export async function resetMock(config, fetchImpl = fetch) {
       podCount: config.experiment.podCount,
       initialObservationsPerPod: config.experiment.initialObservationsPerPod,
     }),
-  });
+  }, config.experiment.requestTimeoutMs ?? 30_000, "Reset mock pod server");
   return expectResponse(response, 200, "Reset mock pod server");
 }
 
@@ -28,11 +28,11 @@ export function initialValues(config) {
 export async function submitPodChange(config, podId, round, observationCount, fetchImpl = fetch) {
   const data = roundPodData(config.mock.serverUrl, podId, round, observationCount);
   const started = performance.now();
-  const response = await fetchImpl(`${config.mock.serverUrl}/${encodeURIComponent(podId)}/changes`, {
+  const response = await fetchWithTimeout(fetchImpl, `${config.mock.serverUrl}/${encodeURIComponent(podId)}/changes`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ observations: data.observations }),
-  });
+  }, config.experiment.requestTimeoutMs ?? 30_000, `Submit mock change for ${podId}`);
   await expectResponse(response, 201, `Submit mock change for ${podId}`);
   return {
     podId,
@@ -43,7 +43,7 @@ export async function submitPodChange(config, podId, round, observationCount, fe
   };
 }
 
-export async function writeObservationRound(config, round, fetchImpl = fetch) {
+export async function writeObservationRound(config, round, fetchImpl = fetch, options = {}) {
   const ids = podIds(config.experiment);
   const results = new Array(ids.length);
   let next = 0;
@@ -58,6 +58,7 @@ export async function writeObservationRound(config, round, fetchImpl = fetch) {
         config.experiment.observationsPerPodPerRound,
         fetchImpl,
       );
+      options.onAccepted?.(index, results[index]);
     }
   });
   await Promise.all(workers);

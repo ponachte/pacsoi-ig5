@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { generateExperimentReport } from "../src/experiment-report.js";
-import { classifyFailureLog } from "../src/benchmark/full-experiment.js";
+import { classifyFailureLog, watchProcessExit } from "../src/benchmark/full-experiment.js";
 
 function distribution(estimate, lower, upper) {
   return { sampleSize: 10, percentiles: { p50: { estimate, ci: { confidenceLevel: 0.95, lower, upper } } } };
@@ -43,4 +43,20 @@ test("classifies Node heap exhaustion and extracts the detected heap size", () =
   const result = classifyFailureLog("Mark-Compact 3900 (4129.3) MB\nFATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory");
   assert.equal(result.kind, "out-of-memory");
   assert.equal(result.detectedHeapMiB, 4129.3);
+});
+
+test("aborts an active attempt as soon as its managed service exits", async () => {
+  const lifecycle = new AbortController();
+  const child = {
+    expectedStop: false,
+    exited: Promise.resolve({ code: null, signal: "SIGKILL" }),
+  };
+
+  const error = await watchProcessExit(child, "service", "/tmp/service.log", lifecycle);
+
+  assert.equal(error.processLabel, "service");
+  assert.equal(error.processSignal, "SIGKILL");
+  assert.match(error.message, /service exited unexpectedly with signal SIGKILL/);
+  assert.equal(lifecycle.signal.aborted, true);
+  assert.equal(lifecycle.signal.reason, error);
 });

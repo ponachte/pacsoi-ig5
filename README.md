@@ -28,6 +28,8 @@ The important experiment settings are:
 - `bootstrapIterations`: offline resamples used for confidence intervals;
 - `bootstrapConfidenceLevel`: confidence level, normally `0.95`;
 - `bootstrapSeed`: makes regenerated statistical results reproducible;
+- `requestTimeoutMs`: maximum time for one HTTP response, including its body;
+- `progressIntervalMs`: interval for in-progress round phase/accepted-pod output;
 - `writeConcurrency`: maximum simultaneous change requests; and
 - `resourceSampleIntervalMs`: service metrics sampling interval.
 
@@ -148,6 +150,12 @@ accepted-input upper bound at the moment failure was detected.
 JavaScript heap exhaustion is classified from the service log. A bare `SIGKILL`
 is reported separately as `process-killed`, since it may indicate the operating
 system OOM killer but is not sufficient evidence to label it definitively.
+Every service, mock, and pod-write request has a bounded timeout, including body
+streaming. While a round is running, periodic output identifies whether it is
+writing, propagating, or finalizing and reports elapsed time and accepted pods.
+The experiment controller also watches the managed service and mock processes.
+An unexpected exit immediately aborts the active request, preserves the partial
+run and completed child log, classifies the failure, and starts the next attempt.
 
 All generated input data is deterministic. Observation and result identifiers
 are derived from pod, round, and observation index; weights vary deterministically

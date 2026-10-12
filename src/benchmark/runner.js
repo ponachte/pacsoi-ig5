@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { projectRoot } from "../config.js";
-import { delay, expectResponse } from "../http.js";
+import { delay, expectResponse, fetchWithTimeout } from "../http.js";
 import { initialValues, writeObservationRound } from "../mock/client.js";
 import { tripleCount, WEIGHT_OBSERVATION_TRIPLES } from "../mock/data.js";
 
@@ -23,14 +23,26 @@ export function weightSnapshot(csv) {
   return { rows, count, average: count ? weightedSum / count : undefined };
 }
 
-async function fetchWeightSnapshot(serviceUrl, fetchImpl = fetch) {
-  const response = await fetchImpl(`${serviceUrl}/w-dist`, { headers: { Accept: "text/csv" } });
+async function fetchWeightSnapshot(serviceUrl, settings, fetchImpl = fetch) {
+  const response = await fetchWithTimeout(
+    fetchImpl,
+    `${serviceUrl}/w-dist`,
+    { headers: { Accept: "text/csv" } },
+    settings.requestTimeoutMs ?? 30_000,
+    "Read weight distribution",
+  );
   const csv = await expectResponse(response, 200, "Read weight distribution");
   return weightSnapshot(csv);
 }
 
-async function fetchMockMetrics(mockUrl, fetchImpl = fetch) {
-  return expectResponse(await fetchImpl(`${mockUrl}/metrics`), 200, "Read mock metrics");
+async function fetchMockMetrics(mockUrl, settings, fetchImpl = fetch) {
+  return expectResponse(await fetchWithTimeout(
+    fetchImpl,
+    `${mockUrl}/metrics`,
+    {},
+    settings.requestTimeoutMs ?? 30_000,
+    "Read mock metrics",
+  ), 200, "Read mock metrics");
 }
 
 function verifyTripleCount(metrics, expected) {
@@ -43,7 +55,7 @@ export async function waitForAggregate(serviceUrl, expected, settings, fetchImpl
   const started = performance.now();
   let latest;
   while (performance.now() - started < settings.timeoutMs) {
-    latest = await fetchWeightSnapshot(serviceUrl, fetchImpl);
+    latest = await fetchWeightSnapshot(serviceUrl, settings, fetchImpl);
     const averageMatches = latest.average !== undefined && Math.abs(latest.average - expected.average) < 0.011;
     if (latest.count === expected.count && averageMatches) return latest;
     await delay(settings.pollIntervalMs);
@@ -54,12 +66,18 @@ export async function waitForAggregate(serviceUrl, expected, settings, fetchImpl
   );
 }
 
-async function resourceSampler(serviceUrl, intervalMs, fetchImpl) {
+async function resourceSampler(serviceUrl, intervalMs, requestTimeoutMs, fetchImpl) {
   const samples = [];
   const errors = [];
   let inFlight;
   const capture = async () => {
-    const response = await fetchImpl(`${serviceUrl}/metrics`);
+    const response = await fetchWithTimeout(
+      fetchImpl,
+      `${serviceUrl}/metrics`,
+      {},
+      requestTimeoutMs,
+      "Read service metrics",
+    );
     const metrics = await expectResponse(response, 200, "Read service metrics");
     samples.push({ observedAt: new Date().toISOString(), ...metrics });
   };
@@ -115,18 +133,33 @@ export async function runRound(config, round, cumulativeValues, fetchImpl = fetc
   const stopSampling = await resourceSampler(
     config.service.serverUrl,
     config.experiment.resourceSampleIntervalMs,
+    config.experiment.requestTimeoutMs ?? 30_000,
     fetchImpl,
   );
+  let phase = "writing";
+  let acceptedPods = 0;
+  console.log(`[round ${round}/${config.experiment.iterations}] phase=writing acceptedPods=0/${config.experiment.podCount}`);
+  const progressTimer = setInterval(() => {
+    console.log(
+      `[round ${round}/${config.experiment.iterations}] phase=${phase} ` +
+      `elapsed=${((performance.now() - started) / 1000).toFixed(1)}s ` +
+      `acceptedPods=${acceptedPods}/${config.experiment.podCount}`,
+    );
+  }, config.experiment.progressIntervalMs ?? 10_000);
   try {
-    const writes = await writeObservationRound(config, round, fetchImpl);
+    const writes = await writeObservationRound(config, round, fetchImpl, {
+      onAccepted: () => { acceptedPods += 1; },
+    });
     const lastWriteAccepted = performance.now();
     const roundValues = writes.flatMap(({ values }) => values);
     cumulativeValues.push(...roundValues);
     const expected = expectation(cumulativeValues);
+    phase = "propagating";
     const aggregate = await waitForAggregate(config.service.serverUrl, expected, config.experiment, fetchImpl);
     const completed = performance.now();
     const samples = await stopSampling();
-    const mockMetrics = await fetchMockMetrics(config.mock.serverUrl, fetchImpl);
+    phase = "finalizing";
+    const mockMetrics = await fetchMockMetrics(config.mock.serverUrl, config.experiment, fetchImpl);
     const cumulativeTriples = tripleCount(config.experiment.podCount, expected.count);
     verifyTripleCount(mockMetrics, cumulativeTriples);
     return {
@@ -152,6 +185,8 @@ export async function runRound(config, round, cumulativeValues, fetchImpl = fetc
     const samples = await stopSamplerSafely(stopSampling);
     error.lastServiceMetrics = samples.at(-1);
     throw error;
+  } finally {
+    clearInterval(progressTimer);
   }
 }
 
@@ -170,11 +205,16 @@ export async function runExperiment(config, fetchImpl = fetch, options = {}) {
   let startupStopSampling;
   try {
     const startupStarted = performance.now();
-    startupStopSampling = await resourceSampler(config.service.serverUrl, config.experiment.resourceSampleIntervalMs, fetchImpl);
+    startupStopSampling = await resourceSampler(
+      config.service.serverUrl,
+      config.experiment.resourceSampleIntervalMs,
+      config.experiment.requestTimeoutMs ?? 30_000,
+      fetchImpl,
+    );
     const initialAggregate = await waitForAggregate(config.service.serverUrl, initialExpected, config.experiment, fetchImpl);
     const startupSamples = await startupStopSampling();
     startupStopSampling = undefined;
-    const startupMockMetrics = await fetchMockMetrics(config.mock.serverUrl, fetchImpl);
+    const startupMockMetrics = await fetchMockMetrics(config.mock.serverUrl, config.experiment, fetchImpl);
     const initialTriples = tripleCount(config.experiment.podCount, initialExpected.count);
     verifyTripleCount(startupMockMetrics, initialTriples);
     lastCompletedObservations = initialExpected.count;
@@ -213,7 +253,15 @@ export async function runExperiment(config, fetchImpl = fetch, options = {}) {
     const startupFailureSamples = await stopSamplerSafely(startupStopSampling);
     const lastServiceMetrics = error.lastServiceMetrics ?? startupFailureSamples.at(-1);
     let mockMetrics;
-    try { mockMetrics = await fetchMockMetrics(config.mock.serverUrl, fetchImpl); } catch {}
+    if (error.processLabel !== "mock server") {
+      try {
+        mockMetrics = await fetchMockMetrics(
+          config.mock.serverUrl,
+          config.experiment,
+          options.diagnosticFetchImpl ?? fetchImpl,
+        );
+      } catch {}
+    }
     const serviceObservationsAtLastSample = lastServiceMetrics?.distribution?.observations;
     const servicePatientsAtLastSample = lastServiceMetrics?.distribution?.patients;
     const failure = {
