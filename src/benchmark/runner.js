@@ -109,15 +109,29 @@ export function resourceSummary(samples, sinceProcessStart = false) {
   if (!samples.length) return { samples: [] };
   const first = samples[0].process;
   const last = samples.at(-1).process;
+  const peaks = samples.reduce((summary, sample) => ({
+    rssBytes: Math.max(summary.rssBytes, sample.process.maxRssBytes ?? sample.process.rss),
+    heapUsedBytes: Math.max(summary.heapUsedBytes, sample.process.heapUsed),
+    eventLoopP95Ms: Math.max(summary.eventLoopP95Ms, sample.eventLoop.p95Ms),
+  }), {
+    rssBytes: 0,
+    heapUsedBytes: 0,
+    eventLoopP95Ms: 0,
+  });
   return {
-    peakRssBytes: Math.max(...samples.map((sample) => sample.process.maxRssBytes ?? sample.process.rss)),
-    peakHeapUsedBytes: Math.max(...samples.map((sample) => sample.process.heapUsed)),
-    peakEventLoopP95Ms: Math.max(...samples.map((sample) => sample.eventLoop.p95Ms)),
+    peakRssBytes: peaks.rssBytes,
+    peakHeapUsedBytes: peaks.heapUsedBytes,
+    peakEventLoopP95Ms: peaks.eventLoopP95Ms,
     cpuUserMicros: sinceProcessStart ? last.cpuUserMicros : last.cpuUserMicros - first.cpuUserMicros,
     cpuSystemMicros: sinceProcessStart ? last.cpuSystemMicros : last.cpuSystemMicros - first.cpuSystemMicros,
     ...(samples.samplingErrors?.length ? { samplingErrors: samples.samplingErrors } : {}),
     samples,
   };
+}
+
+export function appendValues(target, values) {
+  for (const value of values) target.push(value);
+  return target;
 }
 
 function expectation(values) {
@@ -152,7 +166,7 @@ export async function runRound(config, round, cumulativeValues, fetchImpl = fetc
     });
     const lastWriteAccepted = performance.now();
     const roundValues = writes.flatMap(({ values }) => values);
-    cumulativeValues.push(...roundValues);
+    appendValues(cumulativeValues, roundValues);
     const expected = expectation(cumulativeValues);
     phase = "propagating";
     const aggregate = await waitForAggregate(config.service.serverUrl, expected, config.experiment, fetchImpl);

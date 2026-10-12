@@ -3,7 +3,17 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { parseWeightCsv, resourceSummary, runExperiment, weightSnapshot } from "../src/benchmark/runner.js";
+import { appendValues, parseWeightCsv, resourceSummary, runExperiment, weightSnapshot } from "../src/benchmark/runner.js";
+
+test("appends a large observation round without spreading it into function arguments", () => {
+  const target = [1, 2];
+  const values = Array.from({ length: 150_000 }, (_, index) => index);
+
+  assert.equal(appendValues(target, values), target);
+  assert.equal(target.length, 150_002);
+  assert.equal(target[2], 0);
+  assert.equal(target.at(-1), 149_999);
+});
 
 test("PACSOI weight CSV is parsed into a cumulative completion snapshot", () => {
   const csv = "month,avg_weight,stdev,q25,q75,count\n1,82.50,0.50,82.25,82.75,2";
