@@ -1,11 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import http from "node:http";
 import { createMockPodServer } from "../mock/pod-server.js";
 import { roundPodData } from "../src/mock/data.js";
 
-async function fixture(t) {
-  const server = createMockPodServer({ podPrefix: "latency", podCount: 10_000, initialObservationsPerPod: 2 });
+async function fixture(t, options = {}) {
+  const server = createMockPodServer({
+    podPrefix: "latency", podCount: 10_000, initialObservationsPerPod: 2, ...options,
+  });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(() => server.closeAllConnections());
@@ -61,4 +64,31 @@ test("round changes are published once over the incremental stream", async (t) =
   const event = new TextDecoder().decode((await reader.read()).value);
   assert.match(event, /onWeightObservationAdded/);
   assert.equal((await (await fetch(`${base}/metrics`)).json()).events, 1);
+});
+
+test("logs client-aborted change requests with socket, progress, and resource details", async (t) => {
+  let logAborted;
+  const aborted = new Promise((resolve) => { logAborted = resolve; });
+  const base = await fixture(t, {
+    log: (record) => {
+      if (record.event === "request_aborted") logAborted(record);
+    },
+  });
+  const url = new URL(`${base}/latency00001/changes`);
+  const request = http.request(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Content-Length": "100" },
+  });
+  request.on("error", () => {});
+  request.write("{");
+  setTimeout(() => request.destroy(), 20);
+
+  const record = await aborted;
+  assert.equal(record.method, "POST");
+  assert.equal(record.url, "/latency00001/changes");
+  assert.equal(record.route, "change");
+  assert.equal(record.requestAborted, true);
+  assert.equal(record.acceptedObservations, 0);
+  assert.ok(Number.isInteger(record.connectionCount));
+  assert.ok(record.memory.rss > 0);
 });

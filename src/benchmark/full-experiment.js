@@ -180,6 +180,8 @@ async function runManagedTrial(config, repetition, attempt, directory) {
     if (runError) {
       runError.serviceExitCode = service?.exitCode;
       runError.serviceSignal = service?.signalCode;
+      runError.mockExitCode = mock?.exitCode;
+      runError.mockSignal = mock?.signalCode;
     }
   }
 }
@@ -198,10 +200,23 @@ export function classifyFailureLog(logText = "") {
 }
 
 async function inspectFailure(error) {
-  let logText = "";
-  try { logText = await fsp.readFile(error.runLog, "utf8"); } catch {}
-  const classification = classifyFailureLog(logText);
-  if (classification.kind !== "out-of-memory" && error.serviceSignal === "SIGKILL") {
+  let serviceLogText = "";
+  let mockLogText = "";
+  try { serviceLogText = await fsp.readFile(error.runLog, "utf8"); } catch {}
+  try { mockLogText = await fsp.readFile(error.mockLog, "utf8"); } catch {}
+  const serviceClassification = classifyFailureLog(serviceLogText);
+  const mockClassification = classifyFailureLog(mockLogText);
+  const heapSizes = [serviceClassification.detectedHeapMiB, mockClassification.detectedHeapMiB].filter(Number.isFinite);
+  const classification = {
+    ...serviceClassification,
+    kind: serviceClassification.kind === "out-of-memory" || mockClassification.kind === "out-of-memory"
+      ? "out-of-memory"
+      : serviceClassification.kind,
+    ...(heapSizes.length ? { detectedHeapMiB: Math.max(...heapSizes) } : {}),
+    ...(mockClassification.logTail ? { mockLogTail: mockClassification.logTail } : {}),
+  };
+  if (classification.kind !== "out-of-memory" &&
+      (error.serviceSignal === "SIGKILL" || error.mockSignal === "SIGKILL")) {
     classification.kind = "process-killed";
   }
   return {
@@ -211,6 +226,8 @@ async function inspectFailure(error) {
     errorDetails: errorDetails(error),
     serviceExitCode: error.serviceExitCode,
     serviceSignal: error.serviceSignal,
+    mockExitCode: error.mockExitCode,
+    mockSignal: error.mockSignal,
   };
 }
 

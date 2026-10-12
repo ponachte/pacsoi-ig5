@@ -162,6 +162,12 @@ reset or refusal during a large write batch.
 The experiment controller also watches the managed service and mock processes.
 An unexpected exit immediately aborts the active request, preserves the partial
 run and completed child log, classifies the failure, and starts the next attempt.
+The mock writes structured diagnostics to its attempt log when a request is
+aborted, a response closes before completion, request handling fails, or the
+HTTP parser rejects a client connection. These records include the request
+route, remote address, accepted observations, active SSE subscription and TCP
+connection counts, and mock memory usage; normal request traffic is not logged.
+Failed-attempt summaries also include both child-process exit codes and signals.
 
 All generated input data is deterministic. Observation and result identifiers
 are derived from pod, round, and observation index; weights vary deterministically

@@ -32,7 +32,34 @@ export function createMockPodServer(options = {}) {
     initialObservationsPerPod: Number(options.initialObservationsPerPod ?? 1),
   };
   const pods = new Map();
-  const counters = { requests: 0, changes: 0, events: 0 };
+  const counters = {
+    requests: 0,
+    changes: 0,
+    events: 0,
+    abortedRequests: 0,
+    earlyResponses: 0,
+    handlerErrors: 0,
+    clientErrors: 0,
+  };
+  const logDiagnostic = (event, details = {}) => {
+    server.getConnections((error, connections) => {
+      const subscriptions = [...pods.values()].reduce(
+        (sum, pod) => sum + pod.subscribers.procedure.size + pod.subscribers.observation.size,
+        0,
+      );
+      const record = {
+        timestamp: new Date().toISOString(),
+        event,
+        pid: process.pid,
+        ...counters,
+        ...details,
+        ...(error ? { connectionCountError: error.message } : { connectionCount: connections }),
+        subscriptions,
+        memory: process.memoryUsage(),
+      };
+      (options.log ?? ((value) => console.error(`[mock] ${JSON.stringify(value)}`)))(record);
+    });
+  };
 
   function baseUrl(request) {
     return options.publicUrl?.replace(/\/$/, "") || `http://${request.headers.host}`;
@@ -68,18 +95,52 @@ export function createMockPodServer(options = {}) {
   }
 
   const server = http.createServer(async (request, reply) => {
-    counters.requests += 1;
+    const requestId = ++counters.requests;
+    const started = performance.now();
+    let route = "unmatched";
+    let acceptedObservations = 0;
+    const requestDetails = () => ({
+      requestId,
+      method: request.method,
+      url: request.url,
+      remoteAddress: request.socket.remoteAddress,
+      elapsedMs: Number((performance.now() - started).toFixed(1)),
+      route,
+      requestComplete: request.complete,
+      requestAborted: request.aborted,
+      responseStatus: reply.statusCode,
+      acceptedObservations,
+    });
+    request.on("aborted", () => {
+      counters.abortedRequests += 1;
+      logDiagnostic("request_aborted", requestDetails());
+    });
+    request.on("error", (error) => {
+      logDiagnostic("request_error", { ...requestDetails(), error: error.message, code: error.code });
+    });
+    reply.on("error", (error) => {
+      logDiagnostic("response_error", { ...requestDetails(), error: error.message, code: error.code });
+    });
+    reply.on("close", () => {
+      if (!reply.writableFinished && route !== "sse") {
+        counters.earlyResponses += 1;
+        logDiagnostic("response_closed_early", requestDetails());
+      }
+    });
     try {
       const url = new URL(request.url, baseUrl(request));
       const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
 
       if (request.method === "GET" && url.pathname === "/health") {
+        route = "health";
         return json(reply, 200, { status: "ok", ...settings });
       }
       if (request.method === "GET" && url.pathname === "/configuration") {
+        route = "configuration";
         return json(reply, 200, settings);
       }
       if (request.method === "GET" && url.pathname === "/metrics") {
+        route = "metrics";
         const subscriptions = [...pods.values()].reduce(
           (sum, pod) => sum + pod.subscribers.procedure.size + pod.subscribers.observation.size,
           0,
@@ -96,6 +157,7 @@ export function createMockPodServer(options = {}) {
         });
       }
       if (request.method === "POST" && url.pathname === "/admin/reset") {
+        route = "reset";
         const subscriptions = [...pods.values()].some(
           (pod) => pod.subscribers.procedure.size || pod.subscribers.observation.size,
         );
@@ -112,8 +174,7 @@ export function createMockPodServer(options = {}) {
         }
         settings = next;
         pods.clear();
-        counters.changes = 0;
-        counters.events = 0;
+        for (const key of Object.keys(counters)) counters[key] = 0;
         return json(reply, 200, settings);
       }
 
@@ -122,12 +183,14 @@ export function createMockPodServer(options = {}) {
       if (!pod) return json(reply, 404, { error: "Virtual pod not found" });
 
       if (resource === "changes" && request.method === "POST") {
+        route = "change";
         const body = await requestBody(request);
         if (!Array.isArray(body.observations)) return json(reply, 400, { error: "observations must be an array" });
         for (const observation of body.observations) {
           if (observation?.sosa_observedProperty !== WEIGHT_PROPERTY ||
               observation?.sosa_hasResult?.saref_isValueOfProperty !== WEIGHT_PROPERTY) continue;
           pod.observations.push(observation);
+          acceptedObservations += 1;
           for (const subscriber of pod.subscribers.observation) {
             sendEvent(subscriber, "onWeightObservationAdded", observation);
           }
@@ -138,11 +201,13 @@ export function createMockPodServer(options = {}) {
       }
 
       if (resource === "slices" && segments[3] === "query" && request.method === "POST") {
+        route = "query";
         const body = await requestBody(request);
         const query = String(body.query ?? "");
         const selected = selection(query);
         if (request.headers.accept?.includes("text/event-stream")) {
           if (!selected) return json(reply, 400, { errors: [{ message: "Unsupported subscription" }] });
+          route = "sse";
           reply.writeHead(200, {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
@@ -164,8 +229,26 @@ export function createMockPodServer(options = {}) {
       }
       return json(reply, 404, { error: "Unknown mock endpoint" });
     } catch (error) {
-      return json(reply, 400, { error: error.message });
+      counters.handlerErrors += 1;
+      logDiagnostic("request_handler_error", {
+        ...requestDetails(),
+        error: error.message,
+        code: error.code,
+      });
+      if (!reply.destroyed && !reply.writableEnded && !reply.headersSent) {
+        return json(reply, 400, { error: error.message });
+      }
     }
+  });
+  server.on("clientError", (error, socket) => {
+    counters.clientErrors += 1;
+    logDiagnostic("client_error", {
+      error: error.message,
+      code: error.code,
+      remoteAddress: socket.remoteAddress,
+      remotePort: socket.remotePort,
+    });
+    socket.destroy();
   });
   return server;
 }
