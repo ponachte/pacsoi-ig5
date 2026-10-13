@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { QuerySourceIterator } from "@incremunica/user-tools";
-import { attachPodSources } from "../dist/streams.js";
+import { attachPodSources, createQueryEngine } from "../dist/streams.js";
+
+test("loads both configured incremental query engine implementations", async () => {
+  for (const version of ["memory", "level"]) {
+    const engine = await createQueryEngine(version);
+    assert.equal(typeof engine.queryBindings, "function");
+  }
+});
 
 test("attaches each combined slice to the procedure and weight stream views", () => {
   const procedures = new QuerySourceIterator();

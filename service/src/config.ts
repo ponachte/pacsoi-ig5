@@ -1,4 +1,5 @@
 export type LatencyConfig = {
+  serviceVersion: "memory" | "level";
   podBaseUrls: string[];
   sliceName: string;
   port: number;
@@ -29,9 +30,14 @@ export function buildPodSources(serverUrl: string, prefix: string, count: number
 
 export function readConfig(environment: NodeJS.ProcessEnv = process.env): LatencyConfig {
   const count = positiveInteger(environment.POD_COUNT, "POD_COUNT");
+  const serviceVersion = environment.SERVICE_VERSION?.trim() || "memory";
+  if (serviceVersion !== "memory" && serviceVersion !== "level") {
+    throw new Error("Environment variable SERVICE_VERSION must be either memory or level");
+  }
   const sliceName = environment.SLICE_NAME?.trim().replace(/^\/+|\/+$/g, "") || "pacsoi-latency";
   if (sliceName.includes("/")) throw new Error("SLICE_NAME must be a name, not a path");
   return {
+    serviceVersion,
     podBaseUrls: buildPodSources(
       required(environment, "POD_SERVER_URL"),
       environment.POD_PREFIX?.trim() || "latency",

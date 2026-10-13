@@ -1,100 +1,71 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { DEFAULT_DAYS, DEFAULT_POD_COUNT, DEFAULT_REPETITIONS, DEFAULT_WRITE_CONCURRENCY } from "./scenario.js";
 
 export const projectRoot = path.resolve(import.meta.dirname, "..");
 
-function required(config, key, value) {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`Missing configuration value: ${key}`);
-  return value.trim();
-}
+const SECTIONS = {
+  mock: ["serverUrl"],
+  service: ["serverUrl", "version"],
+  experiment: ["podCount", "days", "repetitions", "writeConcurrency", "serviceMaxOldSpaceMiB"],
+};
 
 function positiveInteger(key, value) {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${key} must be a positive integer`);
   return value;
 }
 
-function nonNegativeInteger(key, value) {
-  if (!Number.isInteger(value) || value < 0) throw new Error(`${key} must be a non-negative integer`);
-  return value;
-}
-
-function probability(key, value) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value >= 1) {
-    throw new Error(`${key} must be a number greater than 0 and less than 1`);
+function localUrl(key, value) {
+  const url = new URL(value);
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  if (url.protocol !== "http:" || !["localhost", "127.0.0.1", "::1"].includes(hostname) || !url.port) {
+    throw new Error(`${key} must be a local http URL with a port, received ${value}`);
   }
-  return value;
+  return value.replace(/\/$/, "");
 }
 
-export function validateConfig(input) {
-  const config = structuredClone(input);
-  config.mock ??= {};
-  config.service ??= {};
-  config.experiment ??= {};
-
-  config.mock.serverUrl = required(config, "mock.serverUrl", config.mock.serverUrl).replace(/\/$/, "");
-  config.service.serverUrl = required(config, "service.serverUrl", config.service.serverUrl).replace(/\/$/, "");
-  config.experiment.podPrefix = config.experiment.podPrefix || "latency";
-  config.experiment.sliceName = config.experiment.sliceName || "pacsoi-latency";
-  config.experiment.podCount = positiveInteger("experiment.podCount", config.experiment.podCount ?? 1);
-  config.experiment.initialObservationsPerPod = positiveInteger(
-    "experiment.initialObservationsPerPod",
-    config.experiment.initialObservationsPerPod ?? 1,
-  );
-  config.experiment.iterations = positiveInteger("experiment.iterations", config.experiment.iterations ?? 5);
-  config.experiment.repetitions = positiveInteger("experiment.repetitions", config.experiment.repetitions ?? 5);
-  config.experiment.retryCount = nonNegativeInteger("experiment.retryCount", config.experiment.retryCount ?? 1);
-  for (const legacyKey of ["minObservationsPerPod", "maxObservationsPerPod", "randomSeed"]) {
-    if (legacyKey in config.experiment) {
-      throw new Error(`experiment.${legacyKey} is no longer supported; use experiment.observationsPerPodPerRound`);
+// Rejects every key outside the configurable surface, so a run can never be
+// silently shaped by an obsolete or misspelled setting.
+export function validateConfig(input = {}) {
+  for (const key of Object.keys(input)) {
+    if (!(key in SECTIONS)) throw new Error(`Unknown configuration section: ${key}`);
+  }
+  for (const [section, keys] of Object.entries(SECTIONS)) {
+    for (const key of Object.keys(input[section] ?? {})) {
+      if (!keys.includes(key)) throw new Error(`${section}.${key} is not configurable`);
     }
   }
-  config.experiment.observationsPerPodPerRound = positiveInteger(
-    "experiment.observationsPerPodPerRound",
-    config.experiment.observationsPerPodPerRound ?? 1,
-  );
-  config.experiment.bootstrapIterations = positiveInteger(
-    "experiment.bootstrapIterations",
-    config.experiment.bootstrapIterations ?? 10_000,
-  );
-  config.experiment.bootstrapConfidenceLevel = probability(
-    "experiment.bootstrapConfidenceLevel",
-    config.experiment.bootstrapConfidenceLevel ?? 0.95,
-  );
-  config.experiment.bootstrapSeed = nonNegativeInteger(
-    "experiment.bootstrapSeed",
-    config.experiment.bootstrapSeed ?? 20_261_012,
-  );
-  config.experiment.pollIntervalMs = positiveInteger("experiment.pollIntervalMs", config.experiment.pollIntervalMs ?? 100);
-  config.experiment.timeoutMs = positiveInteger("experiment.timeoutMs", config.experiment.timeoutMs ?? 60_000);
-  config.experiment.requestTimeoutMs = positiveInteger(
-    "experiment.requestTimeoutMs",
-    config.experiment.requestTimeoutMs ?? 30_000,
-  );
-  config.experiment.progressIntervalMs = positiveInteger(
-    "experiment.progressIntervalMs",
-    config.experiment.progressIntervalMs ?? 10_000,
-  );
-  config.experiment.writeConcurrency = positiveInteger("experiment.writeConcurrency", config.experiment.writeConcurrency ?? 100);
-  config.experiment.resourceSampleIntervalMs = positiveInteger(
-    "experiment.resourceSampleIntervalMs",
-    config.experiment.resourceSampleIntervalMs ?? 250,
-  );
-  config.experiment.startupTimeoutMs = positiveInteger(
-    "experiment.startupTimeoutMs",
-    config.experiment.startupTimeoutMs ?? config.experiment.timeoutMs,
-  );
-  config.experiment.shutdownTimeoutMs = positiveInteger(
-    "experiment.shutdownTimeoutMs",
-    config.experiment.shutdownTimeoutMs ?? 10_000,
-  );
-  return config;
+  const version = input.service?.version ?? "memory";
+  if (!["memory", "level"].includes(version)) throw new Error("service.version must be either memory or level");
+  const experiment = input.experiment ?? {};
+  return {
+    mock: { serverUrl: localUrl("mock.serverUrl", input.mock?.serverUrl ?? "http://localhost:3001") },
+    service: {
+      serverUrl: localUrl("service.serverUrl", input.service?.serverUrl ?? "http://localhost:3000"),
+      version,
+    },
+    experiment: {
+      podCount: positiveInteger("experiment.podCount", experiment.podCount ?? DEFAULT_POD_COUNT),
+      days: positiveInteger("experiment.days", experiment.days ?? DEFAULT_DAYS),
+      repetitions: positiveInteger("experiment.repetitions", experiment.repetitions ?? DEFAULT_REPETITIONS),
+      writeConcurrency: positiveInteger(
+        "experiment.writeConcurrency",
+        experiment.writeConcurrency ?? DEFAULT_WRITE_CONCURRENCY,
+      ),
+      ...(experiment.serviceMaxOldSpaceMiB === undefined ? {} : {
+        serviceMaxOldSpaceMiB: positiveInteger("experiment.serviceMaxOldSpaceMiB", experiment.serviceMaxOldSpaceMiB),
+      }),
+    },
+  };
 }
 
+// config.json is optional: without it the default scenario runs.
 export async function loadConfig(file = process.env.LATENCY_LAB_CONFIG || path.join(projectRoot, "config.json")) {
+  let input = {};
   try {
-    return validateConfig(JSON.parse(await fs.readFile(path.resolve(file), "utf8")));
+    input = JSON.parse(await fs.readFile(path.resolve(file), "utf8"));
   } catch (error) {
-    if (error.code === "ENOENT") throw new Error(`Configuration not found: ${path.resolve(file)}. Copy config.example.json to config.json.`);
-    throw error;
+    if (error.code !== "ENOENT" || process.env.LATENCY_LAB_CONFIG) throw error;
   }
+  return validateConfig(input);
 }

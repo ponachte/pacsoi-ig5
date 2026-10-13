@@ -1,28 +1,23 @@
 #!/usr/bin/env node
 import { loadConfig } from "../src/config.js";
-import { resetMock } from "../src/mock/client.js";
-import { runExperiment } from "../src/benchmark/runner.js";
-import { check } from "../src/check.js";
 import { generateRunReport } from "../src/report.js";
 import { runFullExperiment } from "../src/benchmark/full-experiment.js";
 
 const help = `Usage: latency-lab <command>
 
 Commands:
-  mock reset   Reset virtual pods and seed their initial procedure/weight data
-  check        Check mock configuration and standalone service health
-  run          Push round changes, validate full results, and record latency/resources
-  experiment   Build and manage mock/service processes, repeat the run, and aggregate statistics
+  experiment   Build the service, then for every repetition start a fresh mock
+               and service, run all days, and aggregate the statistics
   report FILE [--error FILE] [--output FILE]
-               Generate a self-contained HTML report for one run
+               Generate a self-contained HTML report for one repetition file
   help         Show this help
 `;
 
 async function main() {
   const args = process.argv.slice(2);
-  const command = args.join(" ") || "help";
+  const command = args[0] ?? "help";
   if (["help", "--help", "-h"].includes(command)) return console.log(help);
-  if (args[0] === "report") {
+  if (command === "report") {
     if (!args[1] || args[1].startsWith("--")) throw new Error("report requires an NDJSON run file");
     const option = (name) => {
       const index = args.indexOf(name);
@@ -33,16 +28,13 @@ async function main() {
     const report = await generateRunReport(args[1], { errorFile: option("--error"), output: option("--output") });
     return console.log(`Report: ${report.output}`);
   }
-  const config = await loadConfig();
-  if (command === "mock reset") console.log(JSON.stringify(await resetMock(config), null, 2));
-  else if (command === "check") console.log(JSON.stringify(await check(config), null, 2));
-  else if (command === "run") console.log(`Results: ${await runExperiment(config)}`);
-  else if (["experiment", "full"].includes(command)) {
-    const result = await runFullExperiment(config);
+  if (command === "experiment" && args.length === 1) {
+    const result = await runFullExperiment(await loadConfig());
     console.log(`Experiment summary: ${result.output}`);
     console.log(`Experiment report: ${result.report}`);
+    return undefined;
   }
-  else throw new Error(`Unknown command: ${command}\n\n${help}`);
+  throw new Error(`Unknown command: ${args.join(" ")}\n\n${help}`);
 }
 
 main().catch((error) => { console.error(error.message); process.exitCode = 1; });

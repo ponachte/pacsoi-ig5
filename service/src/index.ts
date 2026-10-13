@@ -15,7 +15,7 @@ async function main() {
   const eventLoop = monitorEventLoopDelay({ resolution: 20 });
   eventLoop.enable();
 
-  await startStreams(procedures, weights, distribution, mutex);
+  await startStreams(procedures, weights, distribution, mutex, config.serviceVersion);
   attachPodSources(
     config.podBaseUrls,
     {
@@ -28,7 +28,11 @@ async function main() {
   console.log(`[MAIN] Attached ${config.podBaseUrls.length} PACSOI latency pod source(s)`);
 
   const app = Fastify();
-  app.get("/health", async () => ({ status: "ok", podCount: config.podBaseUrls.length }));
+  app.get("/health", async () => ({
+    status: "ok",
+    podCount: config.podBaseUrls.length,
+    serviceVersion: config.serviceVersion,
+  }));
   app.get("/metrics", async () => {
     const cpu = process.cpuUsage();
     const resource = process.resourceUsage();
@@ -42,6 +46,7 @@ async function main() {
       timestamp: new Date().toISOString(),
       uptimeSeconds: process.uptime(),
       podCount: config.podBaseUrls.length,
+      serviceVersion: config.serviceVersion,
       process: {
         ...process.memoryUsage(),
         maxRssBytes: resource.maxRSS * 1024,

@@ -1,14 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import http from "node:http";
 import { createMockPodServer } from "../mock/pod-server.js";
-import { roundPodData } from "../src/mock/data.js";
+import { observation } from "../src/mock/data.js";
 
-async function fixture(t, options = {}) {
-  const server = createMockPodServer({
-    podPrefix: "latency", podCount: 10_000, initialObservationsPerPod: 2, ...options,
-  });
+async function fixture(t, podCount = 2, writeConcurrency = 100) {
+  const server = createMockPodServer({ podCount, writeConcurrency, log: () => {} });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(() => server.closeAllConnections());
@@ -16,84 +13,110 @@ async function fixture(t, options = {}) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
-test("10,000 virtual pods allocate no pod state before use", async (t) => {
-  const base = await fixture(t);
-  const metrics = await (await fetch(`${base}/metrics`)).json();
-  assert.equal(metrics.podCount, 10_000);
-  assert.equal(metrics.materializedPods, 0);
-  assert.equal(metrics.triples, 0);
-  assert.ok(metrics.memory.heapUsed < 100 * 1024 * 1024);
-});
+const queryUrl = (base, pod) => `${base}/${pod}/slices/pacsoi-latency/query`;
 
-test("initial query returns seeded procedure and weight data", async (t) => {
-  const base = await fixture(t);
-  const response = await fetch(`${base}/latency00001/slices/pacsoi-latency/query`, {
+async function subscribe(t, base, pod, field) {
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const response = await fetch(queryUrl(base, pod), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify({ query: `subscription { ${field} { id } }` }),
+    signal: controller.signal,
+  });
+  const reader = response.body.getReader();
+  await reader.read();
+  return reader;
+}
+
+async function snapshot(base, pod) {
+  const response = await fetch(queryUrl(base, pod), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query: "{ bariatricProcedures { id subject } weightObservations { id } }" }),
   });
-  const body = await response.json();
-  assert.equal(body.data.bariatricProcedures.length, 1);
-  assert.equal(body.data.weightObservations.length, 2);
-  assert.equal(body.data.bariatricProcedures[0].subject, `${base}/latency00001/patients/main`);
+  return (await response.json()).data;
+}
+
+test("the snapshot holds the procedure and every observation up to the current day", async (t) => {
+  const base = await fixture(t, 1);
+  const initial = await snapshot(base, "latency001");
+  assert.equal(initial.bariatricProcedures.length, 1);
+  assert.equal(initial.bariatricProcedures[0].subject, `${base}/latency001/patients/main`);
+  assert.deepEqual(initial.weightObservations.map(({ id }) => id), [observation(base, "latency001", 1, 0).id]);
+
+  await subscribe(t, base, "latency001", "onWeightObservationAdded");
+  assert.equal((await fetch(`${base}/admin/days/1`, { method: "POST" })).status, 200);
+  assert.equal((await snapshot(base, "latency001")).weightObservations.length, 2);
   const metrics = await (await fetch(`${base}/metrics`)).json();
+  assert.equal(metrics.day, 1);
   assert.equal(metrics.observations, 2);
-  assert.equal(metrics.triples, 20);
+  assert.equal(metrics.triples, 4 + 2 * 8);
 });
 
-test("round changes are published once over the incremental stream", async (t) => {
+test("a day is pushed once to every pod in pod order", async (t) => {
   const base = await fixture(t);
-  const podId = "latency00001";
-  const controller = new AbortController();
-  t.after(() => controller.abort());
-  const stream = await fetch(`${base}/${podId}/slices/pacsoi-latency/query`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ query: "subscription { onWeightObservationAdded { id sosa_hasResult { saref_hasValue } } }" }),
-    signal: controller.signal,
-  });
-  const reader = stream.body.getReader();
-  await reader.read();
-  const data = roundPodData(base, podId, 1, 1);
-  const response = await fetch(`${base}/${podId}/changes`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ observations: data.observations }),
-  });
-  assert.equal(response.status, 201);
-  const event = new TextDecoder().decode((await reader.read()).value);
-  assert.match(event, /onWeightObservationAdded/);
-  assert.equal((await (await fetch(`${base}/metrics`)).json()).events, 1);
+  const first = await subscribe(t, base, "latency001", "onWeightObservationAdded");
+  const second = await subscribe(t, base, "latency002", "onWeightObservationAdded");
+  await subscribe(t, base, "latency001", "onbariatricProcedureAdded");
+
+  const response = await fetch(`${base}/admin/days/1`, { method: "POST" });
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.day, 1);
+  assert.equal(body.events, 2);
+  assert.ok(body.pushMs >= 0);
+  for (const [reader, pod] of [[first, "latency001"], [second, "latency002"]]) {
+    const event = new TextDecoder().decode((await reader.read()).value);
+    assert.match(event, /^event: next\ndata: .*onWeightObservationAdded/);
+    assert.ok(event.includes(observation(base, pod, Number(pod.slice(-3)), 1).id));
+  }
 });
 
-test("logs client-aborted change requests with socket, progress, and resource details", async (t) => {
-  let logAborted;
-  const aborted = new Promise((resolve) => { logAborted = resolve; });
-  const base = await fixture(t, {
-    log: (record) => {
-      if (record.event === "request_aborted") logAborted(record);
-    },
-  });
-  const url = new URL(`${base}/latency00001/changes`);
-  const request = http.request(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Content-Length": "100",
-      "X-Experiment-Request-Id": "test-request-123",
-    },
-  });
-  request.on("error", () => {});
-  request.write("{");
-  setTimeout(() => request.destroy(), 20);
+test("a day is pushed in waves of the configured write concurrency", async (t) => {
+  const base = await fixture(t, 5, 2);
+  const readers = [];
+  for (let number = 1; number <= 5; number += 1) {
+    readers.push(await subscribe(t, base, `latency00${number}`, "onWeightObservationAdded"));
+  }
+  assert.equal((await (await fetch(`${base}/health`)).json()).writeConcurrency, 2);
+  const body = await (await fetch(`${base}/admin/days/1`, { method: "POST" })).json();
+  assert.deepEqual([body.events, body.waves, body.writeConcurrency], [5, 3, 2]);
+  for (const [index, reader] of readers.entries()) {
+    const event = new TextDecoder().decode((await reader.read()).value);
+    assert.ok(event.includes(`latency00${index + 1}/weight-observations/day-1`));
+  }
+});
 
-  const record = await aborted;
-  assert.equal(record.method, "POST");
-  assert.equal(record.url, "/latency00001/changes");
-  assert.equal(record.requestId, "test-request-123");
-  assert.equal(record.route, "change");
-  assert.equal(record.requestAborted, true);
-  assert.equal(record.acceptedObservations, 0);
-  assert.ok(Number.isInteger(record.connectionCount));
-  assert.ok(record.memory.rss > 0);
+test("refuses days out of order and days that would be lost", async (t) => {
+  const base = await fixture(t);
+  await subscribe(t, base, "latency001", "onWeightObservationAdded");
+  const missing = await fetch(`${base}/admin/days/1`, { method: "POST" });
+  assert.equal(missing.status, 409);
+  assert.match((await missing.json()).error, /latency002 has no weight subscription/);
+  await subscribe(t, base, "latency002", "onWeightObservationAdded");
+  const skipped = await fetch(`${base}/admin/days/2`, { method: "POST" });
+  assert.equal(skipped.status, 409);
+  assert.match((await skipped.json()).error, /Next day is 1/);
+  assert.equal((await (await fetch(`${base}/health`)).json()).day, 0);
+});
+
+test("memory does not grow with pushed days", async (t) => {
+  const base = await fixture(t, 200);
+  await Promise.all(Array.from({ length: 200 }, (_, index) =>
+    subscribe(t, base, `latency${String(index + 1).padStart(3, "0")}`, "onWeightObservationAdded")));
+  for (let day = 1; day <= 50; day += 1) {
+    assert.equal((await fetch(`${base}/admin/days/${day}`, { method: "POST" })).status, 200);
+  }
+  const metrics = await (await fetch(`${base}/metrics`)).json();
+  assert.equal(metrics.observations, 200 * 51);
+  assert.equal(metrics.events, 200 * 50);
+  assert.ok(metrics.memory.heapUsed < 100 * 1024 * 1024);
+});
+
+test("unknown pods, slices, and routes are rejected", async (t) => {
+  const base = await fixture(t);
+  for (const url of [`${base}/latency003/slices/pacsoi-latency/query`, `${base}/latency001/slices/other/query`, `${base}/latency001/changes`]) {
+    assert.equal((await fetch(url, { method: "POST", body: "{}" })).status, 404);
+  }
 });

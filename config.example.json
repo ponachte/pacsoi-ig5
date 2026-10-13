@@ -3,27 +3,14 @@
     "serverUrl": "http://localhost:3001"
   },
   "service": {
-    "serverUrl": "http://localhost:3000"
+    "serverUrl": "http://localhost:3000",
+    "version": "memory"
   },
   "experiment": {
-    "podPrefix": "latency",
     "podCount": 10000,
-    "sliceName": "pacsoi-latency",
-    "initialObservationsPerPod": 10,
-    "iterations": 40,
+    "days": 365,
     "repetitions": 50,
-    "retryCount": 0,
-    "observationsPerPodPerRound": 5,
-    "bootstrapIterations": 10000,
-    "bootstrapConfidenceLevel": 0.95,
-    "bootstrapSeed": 20261012,
-    "pollIntervalMs": 100,
-    "timeoutMs": 360000,
-    "requestTimeoutMs": 30000,
-    "progressIntervalMs": 10000,
     "writeConcurrency": 100,
-    "resourceSampleIntervalMs": 250,
-    "startupTimeoutMs": 360000,
-    "shutdownTimeoutMs": 10000
+    "serviceMaxOldSpaceMiB": 16384
   }
 }

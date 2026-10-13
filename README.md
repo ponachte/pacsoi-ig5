@@ -1,126 +1,206 @@
-# PACSOI IG5 mock-pod scale lab
+# PACSOI IG5 latency lab
 
-This repository measures a standalone PACSOI aggregation service against a
-single-process virtual pod server.
+This repository measures how a standalone PACSOI aggregation service, built on
+Incremunica, keeps up with a growing amount of pod data. It runs one fixed,
+deterministic scenario:
 
-The experiment answers two questions:
+- every patient pod holds one bariatric procedure and one weight observation;
+- every simulated day, every pod receives one new weight observation;
+- after each day the lab measures how long the service takes, from the moment
+  the day's observations are pushed until `/w-dist` returns the complete and
+  correct distribution, and what CPU and memory the service uses.
 
-- how much CPU, memory, and event-loop time the service uses for N pods; and
-- how long a round takes from pushing changes to all N pods until `/w-dist`
-  returns the complete correct result.
+By default this is 10,000 pods for 365 days, repeated 50 times: a final state
+of 3.66 million observations, about 29.3 million triples. A repetition in
+which the service runs out of memory is a result, not an error to retry.
 
-## Configuration
+## Run the experiment
 
-Requires Node.js 20 or newer. Copy the example:
-
-```sh
-cp config.example.json config.json
-```
-
-The important experiment settings are:
-
-- `podCount`: number of virtual pods;
-- `initialObservationsPerPod`: weights present before the service starts;
-- `iterations`: number of change rounds;
-- `repetitions`: number of independent runs in a full experiment;
-- `retryCount`: automatic clean restarts allowed after a failed repetition;
-- `observationsPerPodPerRound`: the exact number of additions sent to every pod in every round;
-- `bootstrapIterations`: offline resamples used for confidence intervals;
-- `bootstrapConfidenceLevel`: confidence level, normally `0.95`;
-- `bootstrapSeed`: makes regenerated statistical results reproducible;
-- `requestTimeoutMs`: maximum time for one HTTP response, including its body;
-- `progressIntervalMs`: interval for in-progress round phase/accepted-pod output;
-- `writeConcurrency`: maximum simultaneous change requests; and
-- `resourceSampleIntervalMs`: service metrics sampling interval.
-
-Pod IDs are deterministic. At 10,000 pods they range from `latency00001` to
-`latency10000`.
-
-## Run locally
-
-Start and seed the virtual pod server:
+Requires Node.js 20 or newer.
 
 ```sh
-npm run mock:server
-node bin/latency-lab.js mock reset
-```
-
-Start the standalone service in another terminal:
-
-```sh
-POD_SERVER_URL=http://localhost:3001 \
-POD_PREFIX=latency \
-POD_COUNT=10000 \
-SLICE_NAME=pacsoi-latency \
-npm --prefix service start
-```
-
-Then validate and run:
-
-```sh
-node bin/latency-lab.js check
-node bin/latency-lab.js run
-```
-
-Or run the complete, managed experiment with no separately started processes:
-
-```sh
+npm --prefix service install
 node bin/latency-lab.js experiment
 ```
 
-This builds the service once, then starts a fresh mock and service for every
-repetition. It waits for their health endpoints, resets and verifies the mock,
-checks the service configuration, runs the benchmark, and shuts both processes
-down. A failed attempt is cleaned up and retried according to `retryCount`.
-Managed mode currently requires local `http://localhost` or `127.0.0.1` URLs.
+The experiment builds the service once, then for every repetition starts a
+fresh mock pod server and service, waits until the service has loaded the
+initial pods and opened every subscription, runs all days, and stops both
+processes. Results are written to `results/experiment-<timestamp>/`:
 
-### Run a managed experiment in the background with tmux
+- `repetition-NNN.ndjson`: one startup record, one record per day, and a year
+  record (or a failure record);
+- `repetition-NNN-service.log` and `repetition-NNN-mock.log`;
+- `summary.json`: bootstrap statistics across repetitions, failures; and
+- `report.html`: a self-contained report of the summary.
 
-On a VM, start the experiment inside a `tmux` session so it can continue after
-disconnecting from SSH. From the repository directory:
+`node bin/latency-lab.js report results/experiment-*/repetition-001.ndjson`
+renders a report for one repetition.
+
+### Configuration
+
+Everything that could make two runs of the same scale differ is fixed in
+[`src/scenario.js`](src/scenario.js): the data, the push order, poll and sample
+intervals, timeouts, and bootstrap settings. `config.json` (optional; see
+`config.example.json`, or point `LATENCY_LAB_CONFIG` at another file) accepts
+only:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `service.version` | `memory` | engine under test: `memory` or `level` (LevelDB-backed) |
+| `experiment.podCount` | `10000` | number of pods |
+| `experiment.days` | `365` | number of simulated days |
+| `experiment.repetitions` | `50` | independent repetitions |
+| `experiment.writeConcurrency` | `100` | pods notified per wave when the mock pushes a day |
+| `experiment.serviceMaxOldSpaceMiB` | Node default | heap limit of the service process |
+| `mock.serverUrl`, `service.serverUrl` | `http://localhost:3001`, `:3000` | local ports |
+
+Any other key is rejected. Use a small scale (for example 100 pods for 40 days,
+one repetition) to check a machine before a full run, and a medium run (10,000
+pods for 30 days) to estimate per-day time and memory growth.
+
+Set `serviceMaxOldSpaceMiB` below the VM's free memory so the service fails
+with its own heap error rather than being killed by the operating system. With
+the `level` engine part of the data lives outside the JavaScript heap, so an OS
+kill remains possible.
+
+### Run in the background with tmux
 
 ```sh
-tmux new -s pacsoi-experiment
 mkdir -p results
-node bin/latency-lab.js experiment > results/experiment-console.log 2>&1
-```
-
-Detach without stopping the experiment by pressing **Ctrl+B**, then **D**.
-Reconnect to the session later with:
-
-```sh
-tmux attach -t pacsoi-experiment
-```
-
-To follow the output from another shell without attaching:
-
-```sh
+tmux new-session -d -s pacsoi-experiment \
+  'node bin/latency-lab.js experiment > results/experiment-console.log 2>&1'
 tail -f results/experiment-console.log
 ```
 
-The experiment writes its timestamped `experiment-*` directory, including
-`summary.json` and `report.html`, under `results/` when it completes. List the
-most recent experiment directory with:
+**Ctrl+C** stops `tail`, not the experiment. `tmux attach -t pacsoi-experiment`
+attaches; **Ctrl+B**, then **D** detaches again. `tmux ls` shows whether it is
+still running.
 
-```sh
-ls -td results/experiment-* | head -n 1
-```
+## The workload
 
-The mock must be reset before starting the service. Resetting while incremental
-subscriptions are connected is rejected to prevent mixed experiment state.
+The mock pod server ([`mock/pod-server.js`](mock/pod-server.js)) stands in for
+a Kvasir server. Each pod exposes the GraphQL slice
+`/<pod>/slices/pacsoi-latency/query`, which the service uses in two ways, both
+only while starting:
+
+1. a snapshot query for the pod's current procedure and observations; and
+2. two subscriptions (procedure, weight) kept open as server-sent events.
+
+Pod contents are never stored. They are a pure function of the pod number and
+the current day ([`src/mock/data.js`](src/mock/data.js)), so the mock's memory
+stays flat however many days are pushed and can never be the first process to
+run out of memory:
+
+- observation `d` of a pod is dated `d` days after the procedure (2020-01-15),
+  so a year spreads over 13 month buckets (months 0–12);
+- weights follow a post-surgery trajectory: a per-pod baseline of 90–130 kg, a
+  loss that levels off at 25 kg, and ±1 kg day-to-day variation.
+
+A day is started with `POST /admin/days/<d>`. The mock emits that day's
+observation to every pod in pod order, always the same sequence, in waves of
+`writeConcurrency` pods: the next wave starts once every event of the previous
+wave has been handed to its socket, so at most that many notifications are in
+flight. It refuses to push while any pod lacks a weight subscription, since
+that event would be lost.
+Real Kvasir writes go through its own backend before a notification is sent;
+that write path is outside this measurement.
+
+## What is measured
+
+Before day 1 the lab waits for the initial distribution (one observation per
+pod) and for all `2 × podCount` subscriptions. Then, for each day, it:
+
+1. requests the push (t0);
+2. adds the day to the expected distribution computed from the generator;
+3. polls the service's `/metrics` every 50 ms until its distribution holds
+   every expected observation; this cheap call sets the timing resolution and
+   doubles as the resource sample; and
+4. requests `/w-dist` once to confirm the content (retrying every second if it
+   does not match yet). `/w-dist` sorts every stored value, so the benchmark
+   avoids calling it while the service is still ingesting.
+
+A distribution is correct only when every month bucket matches: the same set of
+months, the exact count per month, and each month's mean within 0.011 of the
+expected mean (the CSV rounds to two decimals).
+
+Each day record reports:
+
+- `endToEndMs`: from t0 until `/w-dist` was observed to be correct;
+- `endToEndLowerBoundMs`: the service cannot have been correct earlier than
+  the mock finished pushing, nor before the last `/metrics` poll that still saw
+  it incomplete; the true moment lies between this bound and `endToEndMs`;
+- `pushMs`, `mockPushMs` and `propagationMs`: time until the mock confirmed the
+  push (and its own push duration), and the time from there until correct;
+- `distributionRequestMs`: how long the confirming `/w-dist` request took; it
+  grows with the data;
+- service resources: peak RSS, peak heap, CPU used during the day, and the
+  longest event-loop delay, plus the mock's memory.
+
+The startup record reports the time until the initial distribution was correct
+and the service's resources since launch. The year record reports `yearWallMs`
+(t0 of day 1 until day `days` was correct), the sums of the daily times, the
+worst day, and the final observation and triple counts.
+
+`summary.json` contains p50, p90, p95 and p99 estimates with
+percentile-bootstrap confidence intervals per day, for startup, and for the
+year. Repetitions are the resampling unit and days are never mixed. Days
+completed before a failure remain in the per-day statistics, so the sample
+count can decline in later days.
+
+### Failure classification
+
+Every failed repetition gets a `kind` that names the process at fault and the
+cause, so a service that runs out of memory is never confused with a mock or
+benchmark problem:
+
+| `kind` | Meaning |
+|---|---|
+| `service-heap-out-of-memory` | the service log contains Node's fatal heap-exhaustion error |
+| `service-os-out-of-memory` | the service was SIGKILLed and the kernel log shows the OOM killer chose its pid |
+| `service-killed` | the service was SIGKILLed without OOM-killer evidence (or the kernel log was unreadable) |
+| `service-crashed` | the service exited unexpectedly for any other reason |
+| `service-timeout` | the service stayed alive but did not return the correct distribution within 30 minutes |
+| `mock-…` | the same causes, for the mock pod server |
+| `run-error` | both processes were alive; the benchmark itself failed |
+
+The failure is charged to the process that exited unexpectedly **first**; a
+later exit of the other process is treated as a consequence. A process stopped
+by the controller (even with a SIGKILL after the shutdown timeout) never counts
+as an unexpected exit. Failures during launch, before the benchmark started,
+have `stage: "launch"`.
+
+The kernel log is read with `dmesg`, falling back to `journalctl -k`; if neither
+is readable, `kernelLogUnavailable` explains why and an OOM-killer SIGKILL stays
+classified as `service-killed`. On the VM, make sure the experiment user can
+read the kernel log (for example `sudo sysctl kernel.dmesg_restrict=0`, or
+membership of the `adm` or `systemd-journal` group).
+
+Each failure records its stage and day, the last fully completed day and triple
+count, the pushed triple count when the failure was detected, and the service's
+last sampled processed triple count and memory. Under `processes.service` and
+`processes.mock` it keeps each process's pid, start and exit times, exit code
+or signal, whether the exit was unexpected, heap-OOM evidence (with the time
+the controller saw the fatal line and the heap size Node reported), OOM-killer
+lines, and the last log lines. The OOM log time is when the controller received
+the fatal text, not the exact instant heap exhaustion began.
+
+`summary.json` counts failures per kind in `failureKinds` and lists every
+service heap or OS out-of-memory failure in `serviceMemoryFailures`, with the
+day it happened and the workload at that point.
+
+## Scale expectations
+
+The dominant cost besides the data is the service's two long-lived SSE streams
+per pod: a 10,000-pod run keeps about 20,000 connections open. Raise the
+open-file limit on the VM before a full-scale run.
 
 ## Run the service as a container
 
-Yes, the service runs directly as a Docker container; the Aggregator is not
-needed. Build it with:
+The service also runs as a Docker container:
 
 ```sh
 docker build -t pacsoi-latency:latest service
-```
-
-When the mock runs on the Docker host on Linux, one example is:
-
-```sh
 docker run --rm --network host \
   -e POD_SERVER_URL=http://127.0.0.1:3001 \
   -e POD_PREFIX=latency \
@@ -130,122 +210,6 @@ docker run --rm --network host \
   pacsoi-latency:latest
 ```
 
-The mock also has an optional container image:
+## Tests
 
-```sh
-docker build -f mock/Dockerfile -t pacsoi-pod-mock:latest .
-```
-
-Set `--public-url`/`MOCK_PUBLIC_URL` when the address seen by the service differs
-from the mock's listen address.
-
-## What is measured
-
-Every virtual pod begins with one bariatric procedure and the configured number
-of deterministic weight observations. Starting the service loads that complete
-initial state and opens two incremental streams per pod: procedure and weight.
-
-The benchmark first waits for the exact initial count and average. Each round
-then:
-
-1. pushes new weight observations to every pod with bounded concurrency;
-2. calculates the exact cumulative count and average;
-3. polls `/w-dist` until the full answer matches;
-4. records write-phase, post-last-write propagation, and end-to-end duration;
-5. samples `/metrics` throughout the round; and
-6. appends the result to `results/run-*.ndjson`.
-
-Resource output includes process-lifetime peak RSS, sampled peak heap, cumulative
-user/system CPU, event-loop p95, and the raw samples. The first NDJSON record is
-a `startup` result with service uptime and CPU since launch; following records
-have `type: "round"` and report CPU consumed during that round.
-
-The mock exposes `/health`, `/configuration`, and `/metrics`. The service exposes
-`/health`, `/metrics`, and `/w-dist`.
-
-A full experiment writes one NDJSON file plus separate mock and service logs per attempt,
-plus `summary.json` and `report.html` under `results/experiment-*`. Latency,
-resource, and throughput metrics contain p50, p90, p95, and p99 estimates with
-reproducible percentile-bootstrap confidence intervals. Experiment repetitions
-are the independent resampling unit and rounds are never mixed. Means and sample
-standard deviations remain secondary diagnostics. Tail estimates receive a
-warning when too few independent repetitions support them. Failed attempts and
-their Wilson-score failure-rate interval remain visible even when a retry succeeds.
-An exhausted repetition does not stop later repetitions. Completed rounds from
-partial attempts remain in the per-round statistics, so the sample count can
-decline at higher triple counts. Each failure records its stage and round, the
-last fully completed triple count, the mock-observed triple count when failure
-was detected, the last service-observed processed triple count, and whether the
-service log contains a Node.js out-of-memory error. Together these distinguish
-the exact safe round boundary, the latest sampled Incremunica state, and the
-accepted-input upper bound at the moment failure was detected.
-JavaScript heap exhaustion is classified from the service log. A bare `SIGKILL`
-is reported separately as `process-killed`, since it may indicate the operating
-system OOM killer but is not sufficient evidence to label it definitively.
-For a detected JavaScript heap OOM, `summary.json` and the HTML report retain
-the request-failure timestamp, the time the fatal OOM text was observed from the
-service process, and the service exit timestamp as separate values. The log
-observation time is when the experiment controller received the fatal text, not
-the exact instant heap exhaustion began; the failure also records the round,
-accepted workload, last completed round, and latest sampled service workload.
-Every service, mock, and pod-write request has a bounded timeout, including body
-streaming. While a round is running, periodic output identifies whether it is
-writing, propagating, or finalizing and reports elapsed time and accepted pods.
-`requestTimeoutMs` is the limit for one HTTP request, not the limit for a whole
-round. Timeout failures identify the operation, URL, request phase, and elapsed
-time; other fetch failures include the nested Node.js cause and network error
-code when available. The failure record also captures the round phase and
-accepted-pod count, which helps distinguish a slow request from a connection
-reset or refusal during a large write batch.
-Each mock change POST carries a unique `X-Experiment-Request-Id`. The client
-includes that ID in any fetch failure details; mock-side request and socket
-diagnostics log it when the request reaches the HTTP handler. Parser-level
-socket errors also include the most recent parsed request on that socket as
-context, which may be an earlier keep-alive request rather than the malformed
-or reset request itself. Writes are not automatically retried because a socket
-failure can happen after the mock applied a write but before the client received
-its response.
-The experiment controller also watches the managed service and mock processes.
-An unexpected exit immediately aborts the active request, preserves the partial
-run and completed child log, classifies the failure, and starts the next attempt.
-The mock writes structured diagnostics to its attempt log when a request is
-aborted, a response closes before completion, request handling fails, or the
-HTTP parser rejects a client connection. These records include the request
-route, remote address, accepted observations, active SSE subscription and TCP
-connection counts, and mock memory usage; normal request traffic is not logged.
-Failed-attempt summaries also include both child-process exit codes and signals.
-
-All generated input data is deterministic. Observation and result identifiers
-are derived from pod, round, and observation index; weights vary deterministically
-by numeric pod sequence, round, and index; and procedure/observation timestamps
-are fixed functions of their indexes. Repeated experiments therefore send the
-same payload data.
-
-## Scale expectations
-
-Virtual pod definitions are lazy: declaring 10,000 pods does not create 10,000
-processes, databases, or records in advance. The dominant cost is the service's
-two long-lived GraphQL/SSE streams per pod. A 10,000-pod run therefore maintains
-about 20,000 connections on both the service and mock hosts.
-
-For the full-scale run, raise the open-file limit on both hosts. A larger VM is
-most likely to be useful for the service, whose query engine owns the stream and
-aggregation state. `/metrics` makes it possible to run smaller steps first and
-identify the point where memory, CPU, or event-loop delay starts growing sharply.
-
-## Commands
-
-```text
-latency-lab mock reset
-latency-lab check
-latency-lab run
-latency-lab experiment
-latency-lab report results/run-*.ndjson --error results/error.txt
-```
-
-The `report` command streams one run file and creates a self-contained offline
-HTML report beside it. It includes summary cards, latency, memory, CPU,
-event-loop pressure, workload, throughput, per-pod write percentiles, a sortable
-round table, and an optional failure annotation.
-
-Run all tests with `npm run test:all`.
+`npm run test:all` runs the lab and service tests.

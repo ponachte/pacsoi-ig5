@@ -1,8 +1,9 @@
-import { QueryEngine } from "@incremunica/query-sparql-incremental";
 import { isAddition, QuerySourceIterator } from "@incremunica/user-tools";
 import { Mutex } from "async-mutex";
 import { WeightDistribution } from "./distribution.js";
 import * as Schemas from "./schemas.js";
+
+type ServiceVersion = "memory" | "level";
 
 type Source = {
   value: string;
@@ -30,8 +31,17 @@ export function attachPodSources(
   }
 }
 
-async function bindings(query: string, sources: QuerySourceIterator) {
-  const engine = new QueryEngine();
+export async function createQueryEngine(version: ServiceVersion) {
+  if (version === "level") {
+    const { QueryEngine } = await import("@incremunica-level/query-sparql-incremental-level");
+    return new QueryEngine();
+  }
+  const { QueryEngine } = await import("@incremunica/query-sparql-incremental");
+  return new QueryEngine();
+}
+
+async function bindings(query: string, sources: QuerySourceIterator, version: ServiceVersion) {
+  const engine = await createQueryEngine(version);
   return engine.queryBindings(query, {
     sources: [{ value: sources, type: "stream-graphql" } as any],
   });
@@ -42,10 +52,11 @@ export async function startStreams(
   weights: QuerySourceIterator,
   distribution: WeightDistribution,
   mutex: Mutex,
+  version: ServiceVersion,
 ) {
   const [procedureStream, weightStream] = await Promise.all([
-    bindings(Schemas.PROCEDURE_QUERY, procedures),
-    bindings(Schemas.WEIGHT_QUERY, weights),
+    bindings(Schemas.PROCEDURE_QUERY, procedures, version),
+    bindings(Schemas.WEIGHT_QUERY, weights, version),
   ]);
 
   procedureStream.on("data", async (binding) => {

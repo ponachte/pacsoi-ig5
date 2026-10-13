@@ -9,7 +9,6 @@
   },
   "scripts": {
     "start": "node bin/latency-lab.js",
-    "mock:server": "node mock/pod-server.js",
     "test": "node --test test/*.test.js",
     "test:service": "npm --prefix service test",
     "test:all": "npm test && npm run test:service"

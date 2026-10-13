@@ -2,32 +2,10 @@ import fs from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-
-function percentile(sorted, fraction) {
-  if (!sorted.length) return undefined;
-  const position = (sorted.length - 1) * fraction;
-  const lower = Math.floor(position);
-  const upper = Math.ceil(position);
-  if (lower === upper) return sorted[lower];
-  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
-}
-
-function writeStats(writes = []) {
-  const durations = writes.map((write) => Number(write.durationMs)).filter(Number.isFinite).sort((a, b) => a - b);
-  const slowest = writes.reduce((current, write) =>
-    !current || Number(write.durationMs) > Number(current.durationMs) ? write : current, undefined);
-  return {
-    p50Ms: percentile(durations, 0.5),
-    p95Ms: percentile(durations, 0.95),
-    p99Ms: percentile(durations, 0.99),
-    maxMs: durations.at(-1),
-    slowestPod: slowest?.podId,
-  };
-}
+import { percentile } from "./statistics.js";
 
 function roundSummary(record) {
   const resources = record.resources ?? {};
-  const stats = writeStats(record.writes);
   return {
     round: record.round,
     observationsAdded: record.observationsAdded,
@@ -35,15 +13,16 @@ function roundSummary(record) {
     triplesAdded: record.triplesAdded,
     cumulativeTriples: record.cumulativeTriples,
     expectedAverage: record.expectedAverage,
-    writePhaseMs: record.writePhaseMs,
-    propagationMs: record.propagationAfterLastWriteMs,
+    pushMs: record.pushMs,
+    propagationMs: record.propagationMs,
     endToEndMs: record.endToEndMs,
-    throughputPerSecond: record.writePhaseMs > 0 ? record.observationsAdded / (record.writePhaseMs / 1000) : undefined,
+    endToEndLowerBoundMs: record.endToEndLowerBoundMs,
+    metricsPolls: record.metricsPolls,
+    distributionRequestMs: record.distributionRequestMs,
     peakRssMiB: resources.peakRssBytes / 1024 / 1024,
     peakHeapMiB: resources.peakHeapUsedBytes / 1024 / 1024,
     cpuSeconds: ((resources.cpuUserMicros ?? 0) + (resources.cpuSystemMicros ?? 0)) / 1e6,
-    eventLoopP95Ms: resources.peakEventLoopP95Ms,
-    ...stats,
+    eventLoopDelayMs: resources.peakEventLoopDelayMs,
   };
 }
 
@@ -54,6 +33,7 @@ export async function readRun(runFile, options = {}) {
   });
   let startup;
   let failure;
+  let year;
   const rounds = [];
   let lineNumber = 0;
   for await (const line of input) {
@@ -66,9 +46,10 @@ export async function readRun(runFile, options = {}) {
     if (record.type === "startup") startup = record;
     else if (record.type === "round") rounds.push(roundSummary(record));
     else if (record.type === "failure") failure = record;
+    else if (record.type === "year") year = record;
   }
   if (!startup && !options.allowPartial) throw new Error(`Run has no startup record: ${runFile}`);
-  return { startup, rounds, failure };
+  return { startup, rounds, failure, year };
 }
 
 function failureSummary(errorText) {
@@ -176,19 +157,17 @@ function chart(title,description,series,yFormat=fmt,options={}){
 const heapSeries=[{name:'RSS MiB',value:r=>r.peakRssMiB},{name:'Heap MiB',value:r=>r.peakHeapMiB}];
 if(report.failure?.heapLimitMiB)heapSeries.push({name:'Detected heap limit',value:()=>report.failure.heapLimitMiB});
 document.querySelector('#charts').innerHTML=[
- chart('Round latency','<strong>What it shows:</strong> time spent pushing a round to every pod, time from the final accepted write until the complete answer appeared, and their combined end-to-end duration. <strong>How to read it:</strong> rising propagation with stable write time points to pressure inside the service rather than slower input.',[{name:'Write phase',value:r=>r.writePhaseMs},{name:'Propagation',value:r=>r.propagationMs},{name:'End to end',value:r=>r.endToEndMs}],duration),
+ chart('Daily latency','<strong>What it shows:</strong> for each day, the time for the mock to push one observation to every pod, the time from that push until the complete correct distribution appeared, the combined end-to-end duration, and its lower bound. <strong>How to read it:</strong> the true moment the service became correct lies between the lower bound and the end-to-end line; growth over the days shows the cost of accumulated state.',[{name:'Push',value:r=>r.pushMs},{name:'Propagation',value:r=>r.propagationMs},{name:'End to end',value:r=>r.endToEndMs},{name:'Lower bound',value:r=>r.endToEndLowerBoundMs}],duration),
  chart('Memory','<strong>What it shows:</strong> the service process resident memory (RSS), JavaScript heap, and the detected V8 heap ceiling when an OOM log is supplied. <strong>How to read it:</strong> sustained growth across rounds indicates retained state; heap approaching the limit predicts heavy garbage collection and eventual failure.',heapSeries,v=>fmt(v/1024,2)+' GiB',{zeroBase:false}),
  chart('CPU per round','<strong>What it shows:</strong> user plus system CPU consumed by the service during each measured round. <strong>How to read it:</strong> compare spikes with latency and event-loop delay; high CPU usually means query processing or garbage collection is delaying convergence.',[{name:'CPU seconds',value:r=>r.cpuSeconds}],v=>fmt(v,1)+' s'),
- chart('Event-loop pressure','<strong>What it shows:</strong> the 95th-percentile delay of the Node.js event loop while the round ran. <strong>How to read it:</strong> low values mean the service remains responsive; large spikes mean CPU work or garbage collection prevented timely processing of network events.',[{name:'p95 delay',value:r=>r.eventLoopP95Ms}],duration),
+ chart('Event-loop pressure','<strong>What it shows:</strong> the longest delay of the service's Node.js event loop during the day. <strong>How to read it:</strong> low values mean the service remains responsive; large spikes mean CPU work or garbage collection prevented timely processing of network events.',[{name:'Max delay',value:r=>r.eventLoopDelayMs}],duration),
  chart('Cumulative workload','<strong>What it shows:</strong> the total number of observations the service must retain and aggregate after every round. <strong>How to read it:</strong> use this as the dataset-size axis when identifying the observation count where memory or latency begins to degrade.',[{name:'Cumulative observations',value:r=>r.cumulativeObservations}],v=>fmt(v,0)),
  chart('RDF triples','<strong>What it shows:</strong> the cumulative RDF triple workload represented by all procedures, observations, and result nodes. <strong>How to read it:</strong> use triples as the implementation-independent dataset-size axis when comparing experiments.',[{name:'Cumulative triples',value:r=>r.cumulativeTriples},{name:'Added this round',value:r=>r.triplesAdded}],v=>fmt(v,0)),
- chart('Observations added per round','<strong>What it shows:</strong> how many new observations were pushed during each individual round. <strong>How to read it:</strong> similar values mean latency changes are caused by accumulated state or resource pressure, not a larger round payload.',[{name:'Added this round',value:r=>r.observationsAdded}],v=>fmt(v,0),{zeroBase:false}),
- chart('Write throughput','<strong>What it shows:</strong> observations accepted by the mock pod server per second during the write phase. <strong>How to read it:</strong> falling throughput indicates the producer, network, mock server, or service subscription processing is applying pressure during ingestion.',[{name:'Observations / second',value:r=>r.throughputPerSecond}],v=>fmt(v,0)+'/s',{zeroBase:false}),
- chart('Per-pod write latency','<strong>What it shows:</strong> median, p95, p99, and slowest individual pod-change request in each round. <strong>How to read it:</strong> a widening gap between p50 and p99/max reveals tail latency even when the typical pod remains fast.',[{name:'p50',value:r=>r.p50Ms},{name:'p95',value:r=>r.p95Ms},{name:'p99',value:r=>r.p99Ms},{name:'max',value:r=>r.maxMs}],duration)
+ chart('Distribution request cost','<strong>What it shows:</strong> how long the /w-dist request that confirmed each day took. <strong>How to read it:</strong> the service sorts every stored value per request, so this grows with the data and is load the benchmark itself adds.',[{name:'/w-dist duration',value:r=>r.distributionRequestMs}],duration)
 ].join('');
-const columns=[['round','Round'],['observationsAdded','Added'],['cumulativeObservations','Cumulative'],['triplesAdded','Triples added'],['cumulativeTriples','Triples total'],['writePhaseMs','Write ms'],['propagationMs','Propagation ms'],['endToEndMs','End-to-end ms'],['peakRssMiB','RSS MiB'],['peakHeapMiB','Heap MiB'],['cpuSeconds','CPU s'],['eventLoopP95Ms','Event loop p95 ms'],['p50Ms','Write p50 ms'],['p95Ms','Write p95 ms'],['p99Ms','Write p99 ms'],['maxMs','Write max ms'],['slowestPod','Slowest pod']];
+const columns=[['round','Round'],['observationsAdded','Added'],['cumulativeObservations','Cumulative'],['triplesAdded','Triples added'],['cumulativeTriples','Triples total'],['pushMs','Push ms'],['propagationMs','Propagation ms'],['endToEndMs','End-to-end ms'],['endToEndLowerBoundMs','Lower bound ms'],['distributionRequestMs','/w-dist ms'],['peakRssMiB','RSS MiB'],['peakHeapMiB','Heap MiB'],['cpuSeconds','CPU s'],['eventLoopDelayMs','Max event-loop delay ms']];
 let direction=1;function renderTable(key='round'){const rows=[...report.rounds].sort((a,b)=>{const av=a[key],bv=b[key];return typeof av==='string'?direction*av.localeCompare(bv):direction*((av??-Infinity)-(bv??-Infinity))});document.querySelector('#rounds').innerHTML='<thead><tr>'+columns.map(([k,l])=>'<th data-key="'+k+'">'+l+'</th>').join('')+'</tr></thead><tbody>'+rows.map(row=>'<tr>'+columns.map(([key])=>'<td>'+fmtCell(key,row[key])+'</td>').join('')+'</tr>').join('')+'</tbody>';document.querySelectorAll('th').forEach(th=>th.onclick=()=>{direction=th.dataset.key===key?-direction:1;renderTable(th.dataset.key)})}
-function fmtCell(key,value){if(key==='slowestPod')return value??'—';if(['round','observationsAdded','cumulativeObservations','triplesAdded','cumulativeTriples'].includes(key))return fmt(value,0);return fmt(value,2)}renderTable();
+function fmtCell(key,value){if(['round','observationsAdded','cumulativeObservations','triplesAdded','cumulativeTriples'].includes(key))return fmt(value,0);return fmt(value,2)}renderTable();
 </script></body></html>`;
 }
 

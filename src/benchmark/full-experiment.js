@@ -1,30 +1,36 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { check } from "../check.js";
 import { projectRoot } from "../config.js";
-import { delay, errorDetails, fetchWithTimeout } from "../http.js";
-import { resetMock } from "../mock/client.js";
+import { delay, errorDetails, expectResponse, fetchWithTimeout } from "../http.js";
 import { readRun } from "../report.js";
+import {
+  BOOTSTRAP,
+  POD_PREFIX,
+  REQUEST_TIMEOUT_MS,
+  SHUTDOWN_TIMEOUT_MS,
+  SLICE_NAME,
+  STARTUP_TIMEOUT_MS,
+} from "../scenario.js";
 import { binomialConfidenceInterval, bootstrapRecords, seedForLabel } from "../statistics.js";
 import { runExperiment } from "./runner.js";
 import { generateExperimentReport } from "../experiment-report.js";
 
-const STARTUP_PERFORMANCE_FIELDS = ["benchmarkWaitMs", "observedServiceUptimeMs", "peakRssMiB", "peakHeapMiB", "cpuSeconds"];
+const STARTUP_PERFORMANCE_FIELDS = [
+  "initialCorrectMs", "benchmarkWaitMs", "observedServiceUptimeMs", "peakRssMiB", "peakHeapMiB", "cpuSeconds",
+];
 const WORKLOAD_FIELDS = ["observationsAdded", "cumulativeObservations", "triplesAdded", "cumulativeTriples"];
-const LATENCY_FIELDS = ["writePhaseMs", "propagationMs", "endToEndMs"];
-const WRITE_LATENCY_FIELDS = ["p50Ms", "p95Ms", "p99Ms", "maxMs"];
-const RESOURCE_FIELDS = ["peakRssMiB", "peakHeapMiB", "cpuSeconds", "eventLoopP95Ms"];
+const LATENCY_FIELDS = ["pushMs", "propagationMs", "endToEndMs", "endToEndLowerBoundMs", "distributionRequestMs"];
+const YEAR_FIELDS = ["yearWallMs", "sumEndToEndMs", "sumPushMs", "sumPropagationMs", "maxEndToEndMs"];
+const RESOURCE_FIELDS = ["peakRssMiB", "peakHeapMiB", "cpuSeconds", "eventLoopDelayMs"];
 
-function localAddress(serverUrl, label) {
+// validateConfig guarantees local http URLs with an explicit port.
+function localAddress(serverUrl) {
   const url = new URL(serverUrl);
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
-  if (url.protocol !== "http:" || !["localhost", "127.0.0.1", "::1"].includes(hostname)) {
-    throw new Error(`Automated ${label} lifecycle requires a local http URL, received ${serverUrl}`);
-  }
-  const host = hostname === "localhost" ? "0.0.0.0" : hostname;
-  return { host, port: Number(url.port || 80) };
+  return { host: hostname === "localhost" ? "0.0.0.0" : hostname, port: Number(url.port) };
 }
 
 export function startProcess(command, args, options, logFile) {
@@ -46,6 +52,9 @@ export function startProcess(command, args, options, logFile) {
   child.stderr.on("data", observeLog);
   child.exited = new Promise((resolve) => child.once("exit", (code, signal) => {
     child.exitedAt = new Date().toISOString();
+    // stopProcess marks a deliberate stop before signalling, so anything else
+    // (including a SIGKILL from stopProcess's own timeout) is not a crash.
+    child.unexpectedExit = !child.expectedStop;
     resolve({ code, signal, exitedAt: child.exitedAt });
   }));
   child.logFinished = new Promise((resolve) => output.once("finish", resolve));
@@ -95,10 +104,10 @@ export async function stopProcess(child, timeoutMs) {
   await child.logFinished;
 }
 
-async function waitForHealth(url, child, timeoutMs, requestTimeoutMs, label, fetchImpl = fetch) {
+async function waitForHealth(url, child, label, fetchImpl = fetch) {
   const started = performance.now();
   let latest;
-  while (performance.now() - started < timeoutMs) {
+  while (performance.now() - started < STARTUP_TIMEOUT_MS) {
     if (child.exitCode !== null || child.signalCode !== null) {
       throw new Error(
         `${label} exited during startup with ${child.signalCode ? `signal ${child.signalCode}` : `code ${child.exitCode}`}`,
@@ -109,7 +118,7 @@ async function waitForHealth(url, child, timeoutMs, requestTimeoutMs, label, fet
         fetchImpl,
         url,
         {},
-        Math.min(requestTimeoutMs, Math.max(1, timeoutMs - (performance.now() - started))),
+        Math.min(REQUEST_TIMEOUT_MS, Math.max(1, STARTUP_TIMEOUT_MS - (performance.now() - started))),
         `Reach ${label}`,
       );
       if (response.ok) return response.json();
@@ -130,10 +139,38 @@ async function buildService(logFile) {
   if (code !== 0) throw new Error(`Service build failed with code ${code}; see ${logFile}`);
 }
 
-async function runManagedTrial(config, repetition, attempt, directory) {
-  const mockAddress = localAddress(config.mock.serverUrl, "mock");
-  const serviceAddress = localAddress(config.service.serverUrl, "service");
-  const stem = `repetition-${String(repetition).padStart(3, "0")}-attempt-${attempt}`;
+export function heapArguments(maxOldSpaceMiB) {
+  return maxOldSpaceMiB ? [`--max-old-space-size=${maxOldSpaceMiB}`] : [];
+}
+
+// Confirms both processes run the configured scale and engine before the
+// benchmark starts.
+async function verifyProcesses(config, fetchImpl) {
+  const health = async (url, operation) => expectResponse(
+    await fetchWithTimeout(fetchImpl, url, {}, REQUEST_TIMEOUT_MS, operation), 200, operation,
+  );
+  const mock = await health(`${config.mock.serverUrl}/health`, "Reach mock pod server");
+  const service = await health(`${config.service.serverUrl}/health`, "Reach service");
+  const { podCount, writeConcurrency } = config.experiment;
+  if (mock.podCount !== podCount || mock.writeConcurrency !== writeConcurrency || mock.day !== 0) {
+    throw new Error(
+      `Mock reports podCount=${mock.podCount}, writeConcurrency=${mock.writeConcurrency}, day=${mock.day}; ` +
+      `expected podCount=${podCount}, writeConcurrency=${writeConcurrency}, day=0`,
+    );
+  }
+  if (service.podCount !== podCount || service.serviceVersion !== config.service.version) {
+    throw new Error(
+      `Service reports podCount=${service.podCount}, version=${service.serviceVersion}; ` +
+      `expected podCount=${podCount}, version=${config.service.version}`,
+    );
+  }
+}
+
+// One repetition: a fresh mock and service, the benchmark, and a clean stop.
+async function runManagedTrial(config, repetition, directory) {
+  const mockAddress = localAddress(config.mock.serverUrl);
+  const serviceAddress = localAddress(config.service.serverUrl);
+  const stem = `repetition-${String(repetition).padStart(3, "0")}`;
   const mockLog = path.join(directory, `${stem}-mock.log`);
   const serviceLog = path.join(directory, `${stem}-service.log`);
   const output = path.join(directory, `${stem}.ndjson`);
@@ -146,46 +183,41 @@ async function runManagedTrial(config, repetition, attempt, directory) {
   try {
     mock = startProcess(process.execPath, [
       "mock/pod-server.js", `--host=${mockAddress.host}`, `--port=${mockAddress.port}`,
-      `--public-url=${config.mock.serverUrl}`,
+      `--public-url=${config.mock.serverUrl}`, `--pod-count=${config.experiment.podCount}`,
+      `--write-concurrency=${config.experiment.writeConcurrency}`,
     ], { cwd: projectRoot }, mockLog);
     exitFailures.push(watchProcessExit(mock, "mock server", mockLog, lifecycle));
-    await waitForHealth(
-      `${config.mock.serverUrl}/health`, mock, config.experiment.startupTimeoutMs,
-      config.experiment.requestTimeoutMs, "mock server", managedFetch,
-    );
-    await resetMock(config, managedFetch);
+    await waitForHealth(`${config.mock.serverUrl}/health`, mock, "mock server", managedFetch);
 
-    service = startProcess(process.execPath, ["service/dist/index.js"], {
+    service = startProcess(process.execPath, [
+      ...heapArguments(config.experiment.serviceMaxOldSpaceMiB),
+      "service/dist/index.js",
+    ], {
       cwd: projectRoot,
       env: {
         ...process.env,
         POD_SERVER_URL: config.mock.serverUrl,
-        POD_PREFIX: config.experiment.podPrefix,
+        POD_PREFIX,
         POD_COUNT: String(config.experiment.podCount),
-        SLICE_NAME: config.experiment.sliceName,
+        SLICE_NAME,
+        SERVICE_VERSION: config.service.version,
         PORT: String(serviceAddress.port),
       },
     }, serviceLog);
     exitFailures.push(watchProcessExit(service, "service", serviceLog, lifecycle));
-    await waitForHealth(
-      `${config.service.serverUrl}/health`, service, config.experiment.startupTimeoutMs,
-      config.experiment.requestTimeoutMs, "service", managedFetch,
-    );
-    await check(config, managedFetch);
+    await waitForHealth(`${config.service.serverUrl}/health`, service, "service", managedFetch);
+    await verifyProcesses(config, managedFetch);
 
     const run = runExperiment(config, managedFetch, { output, repetition, diagnosticFetchImpl: fetch });
     try {
       await Promise.race([run, ...exitFailures.map((exit) => exit.then((error) => { throw error; }))]);
     } catch (error) {
       if (!lifecycle.signal.aborted) lifecycle.abort(error);
-      try {
-        await run;
-      } catch (runErrorWithPartialRecord) {
-        throw runErrorWithPartialRecord;
-      }
+      // Let the run write its failure record; its error carries that record.
+      await run;
       throw error;
     }
-    return { repetition, attempt, output, log: serviceLog, mockLog };
+    return { repetition, output, log: serviceLog, mockLog };
   } catch (error) {
     runError = error;
     error.runOutput ??= output;
@@ -193,20 +225,32 @@ async function runManagedTrial(config, repetition, attempt, directory) {
     error.mockLog = mockLog;
     throw error;
   } finally {
-    await stopProcess(service, config.experiment.shutdownTimeoutMs);
-    await stopProcess(mock, config.experiment.shutdownTimeoutMs);
+    await stopProcess(service, SHUTDOWN_TIMEOUT_MS);
+    await stopProcess(mock, SHUTDOWN_TIMEOUT_MS);
     if (runError) {
-      runError.serviceExitCode = service?.exitCode;
-      runError.serviceSignal = service?.signalCode;
-      runError.serviceStartedAt = service?.startedAt;
-      runError.serviceOomLogObservedAt = service?.oomLogObservedAt;
-      runError.serviceOomLogEvidence = service?.oomLogEvidence;
-      runError.serviceExitedAt = service?.exitedAt;
-      runError.mockExitCode = mock?.exitCode;
-      runError.mockSignal = mock?.signalCode;
-      runError.mockExitedAt = mock?.exitedAt;
+      runError.processes = {
+        service: processSnapshot(service, "service", serviceLog),
+        mock: processSnapshot(mock, "mock", mockLog),
+      };
     }
   }
+}
+
+function processSnapshot(child, name, log) {
+  if (!child) return { process: name, started: false, log };
+  return {
+    process: name,
+    started: true,
+    log,
+    pid: child.pid,
+    startedAt: child.startedAt,
+    exitedAt: child.exitedAt,
+    exitCode: child.exitCode,
+    signal: child.signalCode,
+    unexpectedExit: Boolean(child.unexpectedExit),
+    oomLogObservedAt: child.oomLogObservedAt,
+    oomLogEvidence: child.oomLogEvidence,
+  };
 }
 
 export function classifyFailureLog(logText = "") {
@@ -222,40 +266,99 @@ export function classifyFailureLog(logText = "") {
   };
 }
 
-async function inspectFailure(error) {
-  let serviceLogText = "";
-  let mockLogText = "";
-  try { serviceLogText = await fsp.readFile(error.runLog, "utf8"); } catch {}
-  try { mockLogText = await fsp.readFile(error.mockLog, "utf8"); } catch {}
-  const serviceClassification = classifyFailureLog(serviceLogText);
-  const mockClassification = classifyFailureLog(mockLogText);
-  const heapSizes = [serviceClassification.detectedHeapMiB, mockClassification.detectedHeapMiB].filter(Number.isFinite);
-  const classification = {
-    ...serviceClassification,
-    kind: serviceClassification.kind === "out-of-memory" || mockClassification.kind === "out-of-memory"
-      ? "out-of-memory"
-      : serviceClassification.kind,
-    ...(heapSizes.length ? { detectedHeapMiB: Math.max(...heapSizes) } : {}),
-    ...(mockClassification.logTail ? { mockLogTail: mockClassification.logTail } : {}),
-  };
-  if (classification.kind !== "out-of-memory" &&
-      (error.serviceSignal === "SIGKILL" || error.mockSignal === "SIGKILL")) {
-    classification.kind = "process-killed";
+const execFileAsync = promisify(execFile);
+
+// The kernel log is the only evidence that the operating system's OOM killer
+// sent a SIGKILL. It may be unreadable without privileges; that is recorded.
+export async function readKernelLog(run = execFileAsync) {
+  const errors = [];
+  for (const [command, args] of [["dmesg", []], ["journalctl", ["-k", "--no-pager", "-n", "5000"]]]) {
+    try {
+      const { stdout } = await run(command, args, { maxBuffer: 64 * 1024 * 1024 });
+      return { text: stdout };
+    } catch (error) {
+      errors.push(`${command}: ${error.message.split("\n")[0]}`);
+    }
   }
+  return { unavailable: errors.join("; ") };
+}
+
+export function kernelOomEvidence(kernelLog = "", pid) {
+  if (!pid) return undefined;
+  const pidPattern = new RegExp(`(?:Killed process|pid=)\\s*${pid}\\b`);
+  const lines = kernelLog.split(/\r?\n/).filter((line) => pidPattern.test(line) && /oom|out of memory/i.test(line));
+  return lines.length ? lines.join("\n") : undefined;
+}
+
+// Why one managed process ended: Node's own heap limit, the operating
+// system's OOM killer, another SIGKILL, or any other exit.
+export function processExitCause(outcome) {
+  if (outcome.heapOutOfMemory) return "heap-out-of-memory";
+  if (outcome.kernelOomKill) return "os-out-of-memory";
+  if (outcome.signal === "SIGKILL") return "killed";
+  return "crashed";
+}
+
+export const MEMORY_FAILURE_CAUSES = new Set(["heap-out-of-memory", "os-out-of-memory"]);
+
+// Attributes a repetition's failure to the process that exited unexpectedly first.
+// A process that dies can make the other one fail, so later exits are
+// consequences. Without an exit, a round that never became correct is charged
+// to the service; anything else is a benchmark run error.
+export function classifyFailure(processes, error) {
+  const exited = [processes.service, processes.mock]
+    .filter((outcome) => outcome?.unexpectedExit)
+    .sort((a, b) => (Date.parse(a.exitedAt) || 0) - (Date.parse(b.exitedAt) || 0));
+  const culprit = exited[0];
+  if (culprit) {
+    const cause = processExitCause(culprit);
+    return { kind: `${culprit.process}-${cause}`, failedProcess: culprit.process, cause };
+  }
+  if (error?.code === "AGGREGATE_TIMEOUT") return { kind: "service-timeout", failedProcess: "service", cause: "timeout" };
+  return { kind: "run-error", failedProcess: undefined, cause: "run-error" };
+}
+
+async function inspectProcess(snapshot, kernelLog) {
+  if (!snapshot?.started) return snapshot;
+  let logText = "";
+  try { logText = await fsp.readFile(snapshot.log, "utf8"); } catch {}
+  const logClassification = classifyFailureLog(logText);
+  const { log, ...outcome } = snapshot;
+  const heapOutOfMemory = logClassification.kind === "out-of-memory" ? {
+    logObservedAt: snapshot.oomLogObservedAt,
+    evidence: snapshot.oomLogEvidence,
+    detectedHeapMiB: logClassification.detectedHeapMiB,
+  } : undefined;
+  const kernelOomKill = snapshot.unexpectedExit && snapshot.signal === "SIGKILL"
+    ? kernelOomEvidence(kernelLog?.text, snapshot.pid)
+    : undefined;
+  delete outcome.oomLogObservedAt;
+  delete outcome.oomLogEvidence;
   return {
-    ...(error.benchmarkFailure ?? {}),
-    ...classification,
+    ...outcome,
+    ...(heapOutOfMemory ? { heapOutOfMemory } : {}),
+    ...(kernelOomKill ? { kernelOomKill } : {}),
+    ...(logClassification.logTail ? { logTail: logClassification.logTail } : {}),
+  };
+}
+
+export async function inspectFailure(error, kernelLogReader = readKernelLog) {
+  const snapshots = error.processes ?? {};
+  const needsKernelLog = Object.values(snapshots).some((item) => item?.unexpectedExit && item.signal === "SIGKILL");
+  const kernelLog = needsKernelLog ? await kernelLogReader() : undefined;
+  const processes = {
+    service: await inspectProcess(snapshots.service, kernelLog),
+    mock: await inspectProcess(snapshots.mock, kernelLog),
+  };
+  return {
+    // Without a benchmark record the failure happened while launching or
+    // checking the processes, before the benchmark started.
+    ...(error.benchmarkFailure ?? { stage: "launch" }),
+    ...classifyFailure(processes, error),
     message: error.message,
     errorDetails: errorDetails(error),
-    serviceExitCode: error.serviceExitCode,
-    serviceSignal: error.serviceSignal,
-    ...(error.serviceStartedAt ? { serviceStartedAt: error.serviceStartedAt } : {}),
-    ...(error.serviceOomLogObservedAt ? { serviceOomLogObservedAt: error.serviceOomLogObservedAt } : {}),
-    ...(error.serviceOomLogEvidence ? { serviceOomLogEvidence: error.serviceOomLogEvidence } : {}),
-    ...(error.serviceExitedAt ? { serviceExitedAt: error.serviceExitedAt } : {}),
-    mockExitCode: error.mockExitCode,
-    mockSignal: error.mockSignal,
-    ...(error.mockExitedAt ? { mockExitedAt: error.mockExitedAt } : {}),
+    processes,
+    ...(kernelLog?.unavailable ? { kernelLogUnavailable: kernelLog.unavailable } : {}),
   };
 }
 
@@ -274,20 +377,19 @@ function fixedMetrics(records, fields) {
   }));
 }
 
-function bootstrapOptions(config, label) {
+function bootstrapOptions(label) {
   return {
-    iterations: config.experiment.bootstrapIterations,
-    confidenceLevel: config.experiment.bootstrapConfidenceLevel,
-    seed: seedForLabel(config.experiment.bootstrapSeed, label),
+    iterations: BOOTSTRAP.iterations,
+    confidenceLevel: BOOTSTRAP.confidenceLevel,
+    seed: seedForLabel(BOOTSTRAP.seed, label),
     label,
   };
 }
 
-async function aggregateAttemptFiles(attempts, config) {
+async function aggregateRunFiles(outputs) {
   const runs = [];
-  for (const attempt of attempts) {
-    if (!attempt.output) continue;
-    try { runs.push(await readRun(attempt.output, { allowPartial: true })); } catch {}
+  for (const output of outputs) {
+    try { runs.push(await readRun(output, { allowPartial: true })); } catch {}
   }
   const startupRecords = runs.filter(({ startup }) => startup).map(({ startup }) => ({
     ...startup,
@@ -295,159 +397,144 @@ async function aggregateAttemptFiles(attempts, config) {
     peakHeapMiB: startup.resources?.peakHeapUsedBytes / 1024 / 1024,
     cpuSeconds: ((startup.resources?.cpuUserMicros ?? 0) + (startup.resources?.cpuSystemMicros ?? 0)) / 1e6,
   }));
+  const yearRecords = runs.filter(({ year }) => year).map(({ year }) => year);
   const roundNumbers = [...new Set(runs.flatMap(({ rounds }) => rounds.map(({ round }) => round)))].sort((a, b) => a - b);
   return {
     startup: startupRecords.length ? {
       workload: fixedMetrics(startupRecords, ["initialObservations", "initialTriples"]),
-      performance: bootstrapRecords(startupRecords, STARTUP_PERFORMANCE_FIELDS, bootstrapOptions(config, "startup")),
+      performance: bootstrapRecords(startupRecords, STARTUP_PERFORMANCE_FIELDS, bootstrapOptions("startup")),
+    } : undefined,
+    year: yearRecords.length ? {
+      workload: fixedMetrics(yearRecords, ["rounds", "finalObservations", "finalTriples"]),
+      performance: bootstrapRecords(yearRecords, YEAR_FIELDS, bootstrapOptions("year")),
     } : undefined,
     rounds: roundNumbers.map((round) => {
       const records = runs.flatMap((run) => run.rounds.filter((record) => record.round === round));
       return {
         round,
         workload: fixedMetrics(records, WORKLOAD_FIELDS),
-        latency: bootstrapRecords(records, LATENCY_FIELDS, bootstrapOptions(config, `round.${round}.latency`)),
-        writeLatency: bootstrapRecords(records, WRITE_LATENCY_FIELDS, {
-          ...bootstrapOptions(config, `round.${round}.writeLatency`),
-          includeSecondary: false,
-        }),
-        throughput: bootstrapRecords(records, ["throughputPerSecond"], bootstrapOptions(config, `round.${round}.throughput`)),
-        resources: bootstrapRecords(records, RESOURCE_FIELDS, bootstrapOptions(config, `round.${round}.resources`)),
+        latency: bootstrapRecords(records, LATENCY_FIELDS, bootstrapOptions(`round.${round}.latency`)),
+        resources: bootstrapRecords(records, RESOURCE_FIELDS, bootstrapOptions(`round.${round}.resources`)),
       };
     }),
   };
 }
 
+function memoryFailureSummary(failure) {
+  const service = failure.processes?.service ?? {};
+  return {
+    repetition: failure.repetition,
+    kind: failure.kind,
+    stage: failure.stage,
+    round: failure.round,
+    roundProgress: failure.roundProgress,
+    lastCompletedRound: failure.lastCompletedRound,
+    lastCompletedObservations: failure.lastCompletedObservations,
+    lastCompletedTriples: failure.lastCompletedTriples,
+    serviceObservationsAtLastSample: failure.serviceObservationsAtLastSample,
+    serviceTriplesAtLastSample: failure.serviceTriplesAtLastSample,
+    serviceMemoryAtLastSample: failure.serviceMemoryAtLastSample,
+    triplesAtFailure: failure.triplesAtFailure,
+    requestFailedAt: failure.failedAt,
+    serviceStartedAt: service.startedAt,
+    oomLogObservedAt: service.heapOutOfMemory?.logObservedAt,
+    serviceExitedAt: service.exitedAt,
+    detectedHeapMiB: service.heapOutOfMemory?.detectedHeapMiB,
+    evidence: service.heapOutOfMemory?.evidence ?? service.kernelOomKill,
+  };
+}
+
 export async function runFullExperiment(config) {
   const startedAt = new Date().toISOString();
-  const id = startedAt.replace(/[:.]/g, "-");
-  const directory = path.join(projectRoot, "results", `experiment-${id}`);
+  const directory = path.join(projectRoot, "results", `experiment-${startedAt.replace(/[:.]/g, "-")}`);
   await fsp.mkdir(directory, { recursive: true });
-  const buildLog = path.join(directory, "build.log");
-  await buildService(buildLog);
+  await buildService(path.join(directory, "build.log"));
 
-  const trials = [];
+  const { podCount, days, repetitions, writeConcurrency } = config.experiment;
+  const relative = (file) => (file ? path.relative(directory, file) : undefined);
+  const runs = [];
   const failures = [];
-  const attempts = [];
-  for (let repetition = 1; repetition <= config.experiment.repetitions; repetition += 1) {
-    let completed = false;
-    for (let attempt = 1; attempt <= config.experiment.retryCount + 1 && !completed; attempt += 1) {
-      try {
-        console.log(`[experiment ${repetition}/${config.experiment.repetitions}] attempt ${attempt}`);
-        const trial = await runManagedTrial(config, repetition, attempt, directory);
-        trials.push(trial);
-        attempts.push({ repetition, attempt, status: "success", output: trial.output, log: trial.log, mockLog: trial.mockLog });
-        completed = true;
-      } catch (error) {
-        const detail = await inspectFailure(error);
-        const failure = {
-          repetition,
-          attempt,
-          ...detail,
-          output: error.runOutput,
-          log: error.runLog,
-          mockLog: error.mockLog,
-          observedAt: new Date().toISOString(),
-        };
-        failures.push(failure);
-        attempts.push({ ...failure, status: "failure", output: error.runOutput, log: error.runLog, mockLog: error.mockLog });
-        console.error(
-          `[experiment ${repetition}] attempt ${attempt} failed ` +
-          `(classification=${detail.kind}${detail.serviceOomLogObservedAt
-            ? `, oomLogObservedAt=${detail.serviceOomLogObservedAt}`
-            : ""}): ${error.message}\n` +
-          JSON.stringify({
-            ...errorDetails(error),
-            classification: detail.kind,
-            ...(detail.serviceOomLogObservedAt
-              ? { serviceOomLogObservedAt: detail.serviceOomLogObservedAt }
-              : {}),
-            ...(detail.serviceExitedAt ? { serviceExitedAt: detail.serviceExitedAt } : {}),
-            ...(detail.serviceOomLogEvidence
-              ? { serviceOomLogEvidence: detail.serviceOomLogEvidence }
-              : {}),
-            ...(detail.serviceExitCode !== undefined ? { serviceExitCode: detail.serviceExitCode } : {}),
-            ...(detail.serviceSignal ? { serviceSignal: detail.serviceSignal } : {}),
-          }),
-        );
-      }
-    }
-    if (!completed) {
-      console.error(`[experiment ${repetition}] no successful attempt; continuing with the next repetition`);
+  // A failed repetition is not retried: the workload is deterministic, so a
+  // failure such as an out-of-memory is itself the result.
+  for (let repetition = 1; repetition <= repetitions; repetition += 1) {
+    console.log(`[experiment ${repetition}/${repetitions}] serviceVersion=${config.service.version} pods=${podCount} days=${days} writeConcurrency=${writeConcurrency}`);
+    try {
+      const trial = await runManagedTrial(config, repetition, directory);
+      runs.push({ repetition, status: "success", output: trial.output, log: trial.log, mockLog: trial.mockLog });
+    } catch (error) {
+      const failure = {
+        repetition,
+        ...await inspectFailure(error),
+        output: error.runOutput,
+        log: error.runLog,
+        mockLog: error.mockLog,
+        observedAt: new Date().toISOString(),
+      };
+      failures.push(failure);
+      runs.push({ repetition, status: "failure", kind: failure.kind, output: error.runOutput, log: error.runLog, mockLog: error.mockLog });
+      console.error(
+        `[experiment ${repetition}] failed (kind=${failure.kind}): ${error.message}\n` +
+        JSON.stringify({
+          kind: failure.kind,
+          failedProcess: failure.failedProcess,
+          stage: failure.stage,
+          round: failure.round,
+          lastCompletedRound: failure.lastCompletedRound,
+          processes: Object.fromEntries(Object.entries(failure.processes).map(([name, item]) => [name, {
+            exitedAt: item?.exitedAt,
+            exitCode: item?.exitCode,
+            signal: item?.signal,
+            unexpectedExit: item?.unexpectedExit,
+            heapOutOfMemory: item?.heapOutOfMemory,
+            kernelOomKill: item?.kernelOomKill,
+          }])),
+          errorDetails: errorDetails(error),
+        }),
+      );
     }
   }
 
-  const aggregate = await aggregateAttemptFiles(attempts, config);
-  const failureRate = binomialConfidenceInterval(
-    failures.length,
-    attempts.length,
-    config.experiment.bootstrapConfidenceLevel,
-  );
+  const successful = runs.filter(({ status }) => status === "success").length;
   const summary = {
     type: "experiment-summary",
-    status: trials.length === config.experiment.repetitions ? "complete" : "partial",
+    status: successful === repetitions ? "complete" : "partial",
     startedAt,
     completedAt: new Date().toISOString(),
-    repetitions: trials.length,
-    observationsPerPodPerRound: config.experiment.observationsPerPodPerRound,
+    serviceVersion: config.service.version,
+    podCount,
+    days,
+    writeConcurrency,
+    requestedRepetitions: repetitions,
+    repetitions: successful,
     statistics: {
       method: "repetition-level percentile bootstrap",
       confidenceInterval: "percentile bootstrap",
-      iterations: config.experiment.bootstrapIterations,
-      confidenceLevel: config.experiment.bootstrapConfidenceLevel,
-      seed: config.experiment.bootstrapSeed,
-      latencyPopulation: "completed rounds from all attempts; rounds are analyzed separately and sample size may decline after failures",
+      ...BOOTSTRAP,
+      latencyPopulation: "completed days from all repetitions; days are analyzed separately and sample size may decline after failures",
     },
-    requestedRepetitions: config.experiment.repetitions,
-    trials: trials.map((trial) => ({
-      ...trial,
-      output: path.relative(directory, trial.output),
-      log: path.relative(directory, trial.log),
-      mockLog: path.relative(directory, trial.mockLog),
-    })),
-    attempts: attempts.map((attempt) => ({
-      ...attempt,
-      output: attempt.output ? path.relative(directory, attempt.output) : undefined,
-      log: attempt.log ? path.relative(directory, attempt.log) : undefined,
-      mockLog: attempt.mockLog ? path.relative(directory, attempt.mockLog) : undefined,
-    })),
+    runs: runs.map((run) => ({ ...run, output: relative(run.output), log: relative(run.log), mockLog: relative(run.mockLog) })),
     failures: failures.map((failure) => ({
       ...failure,
-      output: failure.output ? path.relative(directory, failure.output) : undefined,
-      log: failure.log ? path.relative(directory, failure.log) : undefined,
-      mockLog: failure.mockLog ? path.relative(directory, failure.mockLog) : undefined,
+      output: relative(failure.output),
+      log: relative(failure.log),
+      mockLog: relative(failure.mockLog),
     })),
-    outOfMemoryFailures: failures.filter((failure) => failure.kind === "out-of-memory").map((failure) => ({
-      repetition: failure.repetition,
-      attempt: failure.attempt,
-      failedAt: failure.failedAt ?? failure.observedAt,
-      requestFailedAt: failure.failedAt ?? failure.observedAt,
-      failureRecordedAt: failure.observedAt,
-      serviceStartedAt: failure.serviceStartedAt,
-      oomLogObservedAt: failure.serviceOomLogObservedAt,
-      serviceExitedAt: failure.serviceExitedAt,
-      serviceOomLogEvidence: failure.serviceOomLogEvidence,
-      serviceExitCode: failure.serviceExitCode,
-      serviceSignal: failure.serviceSignal,
-      stage: failure.stage,
-      round: failure.round,
-      roundProgress: failure.roundProgress,
-      lastCompletedRound: failure.lastCompletedRound,
-      lastCompletedTriples: failure.lastCompletedTriples,
-      serviceTriplesAtLastSample: failure.serviceTriplesAtLastSample,
-      triplesAtFailure: failure.triplesAtFailure,
-      detectedHeapMiB: failure.detectedHeapMiB,
-    })),
+    failureKinds: Object.fromEntries(
+      [...new Set(failures.map(({ kind }) => kind))].map((kind) => [kind, failures.filter((item) => item.kind === kind).length]),
+    ),
+    serviceMemoryFailures: failures
+      .filter((failure) => failure.failedProcess === "service" && MEMORY_FAILURE_CAUSES.has(failure.cause))
+      .map(memoryFailureSummary),
     reliability: {
-      attempts: attempts.length,
-      successfulAttempts: trials.length,
-      failedAttempts: failures.length,
-      failureRate,
+      runs: runs.length,
+      successfulRuns: successful,
+      failedRuns: failures.length,
+      failureRate: binomialConfidenceInterval(failures.length, runs.length, BOOTSTRAP.confidenceLevel),
     },
-    ...aggregate,
+    ...await aggregateRunFiles(runs.map(({ output }) => output).filter(Boolean)),
   };
   const output = path.join(directory, "summary.json");
   await fsp.writeFile(output, `${JSON.stringify(summary, null, 2)}\n`);
   const report = await generateExperimentReport(summary, path.join(directory, "report.html"));
-  return { output, report, directory, repetitions: trials.length };
+  return { output, report, directory, repetitions: successful };
 }

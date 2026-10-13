@@ -10,6 +10,7 @@
     "test": "npm run build && node --test test/*.test.mjs"
   },
   "dependencies": {
+    "@incremunica-level/query-sparql-incremental-level": "^1.0.0",
     "@incremunica/query-sparql-incremental": "^2.3.6",
     "@incremunica/user-tools": "^2.3.0",
     "async-mutex": "^0.5.0",

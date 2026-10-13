@@ -17,8 +17,22 @@ test("reads standalone service configuration", () => {
     SLICE_NAME: "pacsoi-latency",
     PORT: "4000",
   }), {
+    serviceVersion: "memory",
     podBaseUrls: ["http://mock:3001/test001", "http://mock:3001/test002"],
     sliceName: "pacsoi-latency",
     port: 4000,
   });
+});
+
+test("selects the Level-backed query engine from SERVICE_VERSION", () => {
+  assert.equal(readConfig({
+    POD_SERVER_URL: "http://mock:3001",
+    POD_COUNT: "1",
+    SERVICE_VERSION: "level",
+  }).serviceVersion, "level");
+  assert.throws(() => readConfig({
+    POD_SERVER_URL: "http://mock:3001",
+    POD_COUNT: "1",
+    SERVICE_VERSION: "unknown",
+  }), /SERVICE_VERSION must be either memory or level/);
 });
