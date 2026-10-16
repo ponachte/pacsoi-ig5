@@ -12,6 +12,7 @@ Environment variables:
 | `POD_PREFIX` | no | Pod prefix; defaults to `latency` |
 | `SLICE_NAME` | no | Combined slice name; defaults to `pacsoi-latency` |
 | `SERVICE_VERSION` | no | Query engine: `memory` (default) or `level` |
+| `DISTRIBUTION` | no | How `/w-dist` statistics are computed: `recompute` (default) or `incremental` |
 | `PORT` | no | HTTP port; defaults to `3000` |
 
 The service constructs pod URLs internally, so 10,000 URLs do not have to fit
@@ -25,6 +26,14 @@ inside one environment variable. It exposes:
 `@incremunica-level/query-sparql-incremental-level`, which keeps selected
 incremental engine state in temporary LevelDB stores. The selected version is
 reported by `/health` and `/metrics`.
+
+`recompute` keeps every weight value per month and computes mean, standard
+deviation and quartiles on each `/w-dist` request (a sort of all values).
+`incremental` maintains them as observations arrive: a running mean and
+variance, and a count per distinct value for exact quartiles, so a request
+costs time proportional to the number of distinct values instead of the number
+of observations. Both return the same CSV. The selected strategy is reported by
+`/health` and `/metrics`.
 
 Build with `docker build -t pacsoi-latency:latest service` and test with
 `npm --prefix service test`.

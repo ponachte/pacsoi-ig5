@@ -10,7 +10,7 @@ async function main() {
   const config = readConfig();
   const procedures = new QuerySourceIterator({ distinct: true });
   const weights = new QuerySourceIterator({ distinct: true });
-  const distribution = new WeightDistribution();
+  const distribution = new WeightDistribution(config.distribution);
   const mutex = new Mutex();
   const eventLoop = monitorEventLoopDelay({ resolution: 20 });
   eventLoop.enable();
@@ -25,13 +25,16 @@ async function main() {
     procedures,
     weights,
   );
-  console.log(`[MAIN] Attached ${config.podBaseUrls.length} PACSOI latency pod source(s)`);
+  console.log(
+    `[MAIN] Attached ${config.podBaseUrls.length} PACSOI latency pod source(s); distribution=${config.distribution}`,
+  );
 
   const app = Fastify();
   app.get("/health", async () => ({
     status: "ok",
     podCount: config.podBaseUrls.length,
     serviceVersion: config.serviceVersion,
+    distributionStrategy: config.distribution,
   }));
   app.get("/metrics", async () => {
     const cpu = process.cpuUsage();
@@ -47,6 +50,7 @@ async function main() {
       uptimeSeconds: process.uptime(),
       podCount: config.podBaseUrls.length,
       serviceVersion: config.serviceVersion,
+      distributionStrategy: config.distribution,
       process: {
         ...process.memoryUsage(),
         maxRssBytes: resource.maxRSS * 1024,

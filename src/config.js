@@ -6,7 +6,7 @@ export const projectRoot = path.resolve(import.meta.dirname, "..");
 
 const SECTIONS = {
   mock: ["serverUrl"],
-  service: ["serverUrl", "version"],
+  service: ["serverUrl", "version", "distribution"],
   experiment: ["podCount", "days", "repetitions", "writeConcurrency", "serviceMaxOldSpaceMiB"],
 };
 
@@ -37,12 +37,17 @@ export function validateConfig(input = {}) {
   }
   const version = input.service?.version ?? "memory";
   if (!["memory", "level"].includes(version)) throw new Error("service.version must be either memory or level");
+  const distribution = input.service?.distribution ?? "recompute";
+  if (!["recompute", "incremental"].includes(distribution)) {
+    throw new Error("service.distribution must be either recompute or incremental");
+  }
   const experiment = input.experiment ?? {};
   return {
     mock: { serverUrl: localUrl("mock.serverUrl", input.mock?.serverUrl ?? "http://localhost:3001") },
     service: {
       serverUrl: localUrl("service.serverUrl", input.service?.serverUrl ?? "http://localhost:3000"),
       version,
+      distribution,
     },
     experiment: {
       podCount: positiveInteger("experiment.podCount", experiment.podCount ?? DEFAULT_POD_COUNT),

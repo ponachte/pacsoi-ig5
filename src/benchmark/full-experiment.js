@@ -158,10 +158,15 @@ async function verifyProcesses(config, fetchImpl) {
       `expected podCount=${podCount}, writeConcurrency=${writeConcurrency}, day=0`,
     );
   }
-  if (service.podCount !== podCount || service.serviceVersion !== config.service.version) {
+  if (
+    service.podCount !== podCount
+    || service.serviceVersion !== config.service.version
+    || service.distributionStrategy !== config.service.distribution
+  ) {
     throw new Error(
-      `Service reports podCount=${service.podCount}, version=${service.serviceVersion}; ` +
-      `expected podCount=${podCount}, version=${config.service.version}`,
+      `Service reports podCount=${service.podCount}, version=${service.serviceVersion}, ` +
+      `distribution=${service.distributionStrategy}; expected podCount=${podCount}, ` +
+      `version=${config.service.version}, distribution=${config.service.distribution}`,
     );
   }
 }
@@ -201,6 +206,7 @@ async function runManagedTrial(config, repetition, directory) {
         POD_COUNT: String(config.experiment.podCount),
         SLICE_NAME,
         SERVICE_VERSION: config.service.version,
+        DISTRIBUTION: config.service.distribution,
         PORT: String(serviceAddress.port),
       },
     }, serviceLog);
@@ -457,7 +463,7 @@ export async function runFullExperiment(config) {
   // A failed repetition is not retried: the workload is deterministic, so a
   // failure such as an out-of-memory is itself the result.
   for (let repetition = 1; repetition <= repetitions; repetition += 1) {
-    console.log(`[experiment ${repetition}/${repetitions}] serviceVersion=${config.service.version} pods=${podCount} days=${days} writeConcurrency=${writeConcurrency}`);
+    console.log(`[experiment ${repetition}/${repetitions}] serviceVersion=${config.service.version} distribution=${config.service.distribution} pods=${podCount} days=${days} writeConcurrency=${writeConcurrency}`);
     try {
       const trial = await runManagedTrial(config, repetition, directory);
       runs.push({ repetition, status: "success", output: trial.output, log: trial.log, mockLog: trial.mockLog });
@@ -501,6 +507,7 @@ export async function runFullExperiment(config) {
     startedAt,
     completedAt: new Date().toISOString(),
     serviceVersion: config.service.version,
+    distribution: config.service.distribution,
     podCount,
     days,
     writeConcurrency,

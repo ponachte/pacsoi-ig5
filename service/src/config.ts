@@ -1,5 +1,8 @@
+import type { DistributionStrategy } from "./distribution.js";
+
 export type LatencyConfig = {
   serviceVersion: "memory" | "level";
+  distribution: DistributionStrategy;
   podBaseUrls: string[];
   sliceName: string;
   port: number;
@@ -34,10 +37,15 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Latenc
   if (serviceVersion !== "memory" && serviceVersion !== "level") {
     throw new Error("Environment variable SERVICE_VERSION must be either memory or level");
   }
+  const distribution = environment.DISTRIBUTION?.trim() || "recompute";
+  if (distribution !== "recompute" && distribution !== "incremental") {
+    throw new Error("Environment variable DISTRIBUTION must be either recompute or incremental");
+  }
   const sliceName = environment.SLICE_NAME?.trim().replace(/^\/+|\/+$/g, "") || "pacsoi-latency";
   if (sliceName.includes("/")) throw new Error("SLICE_NAME must be a name, not a path");
   return {
     serviceVersion,
+    distribution,
     podBaseUrls: buildPodSources(
       required(environment, "POD_SERVER_URL"),
       environment.POD_PREFIX?.trim() || "latency",

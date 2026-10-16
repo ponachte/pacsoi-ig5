@@ -5,7 +5,7 @@ import { validateConfig } from "../src/config.js";
 test("an empty configuration runs the full one-year scenario", () => {
   assert.deepEqual(validateConfig({}), {
     mock: { serverUrl: "http://localhost:3001" },
-    service: { serverUrl: "http://localhost:3000", version: "memory" },
+    service: { serverUrl: "http://localhost:3000", version: "memory", distribution: "recompute" },
     experiment: { podCount: 10_000, days: 365, repetitions: 50, writeConcurrency: 100 },
   });
 });
@@ -32,6 +32,7 @@ test("rejects every other setting so runs cannot silently differ", () => {
 
 test("validates values", () => {
   assert.throws(() => validateConfig({ service: { version: "v3" } }), /service.version must be either memory or level/);
+  assert.throws(() => validateConfig({ service: { distribution: "cached" } }), /service.distribution must be either recompute or incremental/);
   assert.throws(() => validateConfig({ experiment: { days: 0 } }), /experiment.days must be a positive integer/);
   assert.throws(() => validateConfig({ experiment: { writeConcurrency: 0 } }), /experiment.writeConcurrency must be a positive integer/);
   assert.throws(() => validateConfig({ experiment: { serviceMaxOldSpaceMiB: 1.5 } }), /serviceMaxOldSpaceMiB/);

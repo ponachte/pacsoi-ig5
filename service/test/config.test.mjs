@@ -18,6 +18,7 @@ test("reads standalone service configuration", () => {
     PORT: "4000",
   }), {
     serviceVersion: "memory",
+    distribution: "recompute",
     podBaseUrls: ["http://mock:3001/test001", "http://mock:3001/test002"],
     sliceName: "pacsoi-latency",
     port: 4000,
@@ -35,4 +36,11 @@ test("selects the Level-backed query engine from SERVICE_VERSION", () => {
     POD_COUNT: "1",
     SERVICE_VERSION: "unknown",
   }), /SERVICE_VERSION must be either memory or level/);
+});
+
+test("selects how the distribution statistics are computed from DISTRIBUTION", () => {
+  const base = { POD_SERVER_URL: "http://mock:3001", POD_COUNT: "1" };
+  assert.equal(readConfig(base).distribution, "recompute");
+  assert.equal(readConfig({ ...base, DISTRIBUTION: "incremental" }).distribution, "incremental");
+  assert.throws(() => readConfig({ ...base, DISTRIBUTION: "cached" }), /DISTRIBUTION must be either recompute or incremental/);
 });

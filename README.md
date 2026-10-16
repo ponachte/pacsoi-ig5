@@ -48,6 +48,7 @@ only:
 | Key | Default | Purpose |
 |---|---|---|
 | `service.version` | `memory` | engine under test: `memory` or `level` (LevelDB-backed) |
+| `service.distribution` | `recompute` | how `/w-dist` statistics are computed: `recompute` on every read, or maintained `incremental`ly (see [Read-query benchmark](#read-query-benchmark)) |
 | `experiment.podCount` | `10000` | number of pods |
 | `experiment.days` | `365` | number of simulated days |
 | `experiment.repetitions` | `50` | independent repetitions |
@@ -188,6 +189,43 @@ the fatal text, not the exact instant heap exhaustion began.
 `summary.json` counts failures per kind in `failureKinds` and lists every
 service heap or OS out-of-memory failure in `serviceMemoryFailures`, with the
 day it happened and the workload at that point.
+
+## Read-query benchmark
+
+`/w-dist` recomputes mean, standard deviation and quartiles from every stored
+value on each request, so its cost grows with the data. The service's
+`incremental` distribution strategy maintains the same statistics as
+observations arrive (a running sum and variance, and a count per distinct
+value for exact quartiles), and returns the same CSV.
+
+```sh
+npm --prefix service run build
+node --expose-gc bin/latency-lab.js read-benchmark
+```
+
+replays the experiment's data (10,000 pods, 365 days) into both strategies in
+one process, with no network or query engine, and at day 1, every 30th day
+and the last day times `--reads` (10) computations of the CSV per strategy and
+checks that both CSVs are equal. Options: `--pods`, `--days`, `--reads`,
+`--every`. Results go to `results/read-benchmark-<timestamp>/read-benchmark.ndjson`:
+a header (scale and host), one record per checkpoint (read durations, the time
+to add that day's observations, whether the CSVs are identical and the largest
+difference per column), and a summary. Values that land exactly on a
+two-decimal rounding tie can round differently between strategies; such
+checkpoints are reported as within rounding rather than identical. The
+benchmark holds both strategies' data at once, so longer replays need a larger
+heap, for example `--max-old-space-size=16384` for `--days 1825`.
+
+To confirm the result end to end, run the normal experiment with
+`"service": { "distribution": "incremental" }` in `config.json` (a few
+repetitions suffice), then compare:
+
+```sh
+python analysis/ig5_read_comparison.py results/read-benchmark-<timestamp> \
+  --lab-recompute results/experiment-<recompute run> \
+  --lab-incremental results/experiment-<incremental run>
+python analysis/centralized_reference.py results/experiment-<incremental run>
+```
 
 ## Scale expectations
 
